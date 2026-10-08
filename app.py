@@ -194,8 +194,9 @@ def merge(records: list[dict], new: list[dict]) -> list[dict]:
 
 # ═════════════════════════ 3. EXTRACCIÓN DESDE PDF ═════════════════════════
 
-MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
-MAX_PAGES = 90
+MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
+MAX_PAGES = 140
+MAX_UPLOAD_MB = 22
 KEYWORDS = re.compile(
     r"estado de situaci[oó]n|balance general|estado de resultados|estado del resultado|"
     r"evoluci[oó]n del patrimonio|flujo de efectivo|total del activo|total activo", re.I)
@@ -276,18 +277,94 @@ def normalize(result: dict, source: str, company: str | None = None) -> list[dic
 
 
 def extract(pdf_bytes: bytes, api_key: str, source: str, company: str | None = None, model: str = MODEL) -> list[dict]:
-    import anthropic
+    """Envía el PDF a Claude y devuelve registros normalizados.
 
-    data = base64.standard_b64encode(select_pages(pdf_bytes)).decode()
+    La API de Anthropic admite PDFs como bloques de documento codificados en base64.
+    Se valida tamaño y se devuelven errores legibles para Streamlit.
+    """
+    if not api_key:
+        raise RuntimeError(
+            "No está configurada ANTHROPIC_API_KEY. Configurala en "
+            "Streamlit Cloud → Settings → Secrets."
+        )
+
+    size_mb = len(pdf_bytes) / (1024 * 1024)
+    if size_mb > MAX_UPLOAD_MB:
+        raise ValueError(
+            f"El PDF pesa {size_mb:.1f} MB. El límite recomendado de esta app es "
+            f"{MAX_UPLOAD_MB} MB para enviarlo a Claude."
+        )
+
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise RuntimeError(
+            "Falta instalar el paquete anthropic. Agregá 'anthropic>=0.75.0' a requirements.txt."
+        ) from exc
+
+    selected_pdf = select_pages(pdf_bytes)
+    data = base64.standard_b64encode(selected_pdf).decode("utf-8")
+
     client = anthropic.Anthropic(api_key=api_key)
-    msg = client.messages.create(
-        model=model, max_tokens=4000,
-        messages=[{"role": "user", "content": [
-            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}},
-            {"type": "text", "text": PROMPT}]}],
+    try:
+        msg = client.messages.create(
+            model=model,
+            max_tokens=12000,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": data,
+                            },
+                        },
+                        {"type": "text", "text": PROMPT},
+                    ],
+                }
+            ],
+        )
+    except Exception as exc:
+        msg_text = str(exc)
+        if "authentication" in msg_text.lower() or "401" in msg_text:
+            raise RuntimeError(
+                "La ANTHROPIC_API_KEY fue rechazada. Revisá que sea válida y esté activa."
+            ) from exc
+        if "not_found" in msg_text.lower() or "model" in msg_text.lower() and "404" in msg_text:
+            raise RuntimeError(
+                f"El modelo '{model}' no está disponible para tu API key. "
+                "Podés definir CLAUDE_MODEL en Secrets."
+            ) from exc
+        if "413" in msg_text or "too large" in msg_text.lower():
+            raise RuntimeError(
+                "El PDF excede el tamaño máximo aceptado por la API. Probá con un PDF más liviano."
+            ) from exc
+        raise RuntimeError(f"Error de Anthropic al analizar '{source}': {msg_text}") from exc
+
+    text = "".join(
+        b.text for b in msg.content if getattr(b, "type", "") == "text"
     )
-    text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
-    return normalize(parse_json(text), source, company)
+    if not text.strip():
+        raise RuntimeError("Claude respondió sin contenido de texto.")
+
+    try:
+        result = parse_json(text)
+    except Exception as exc:
+        preview = text[:500].replace("\n", " ")
+        raise RuntimeError(
+            "Claude no devolvió un JSON válido. Respuesta parcial: " + preview
+        ) from exc
+
+    recs = normalize(result, source, company)
+    if not recs:
+        raise RuntimeError(
+            "Claude procesó el PDF pero no encontró ejercicios con fecha válida. "
+            "Revisá que el archivo contenga estados contables legibles."
+        )
+    return recs
 
 
 # ═════════════════════════ 4. APP STREAMLIT ═════════════════════════
@@ -299,6 +376,15 @@ def _secret(name: str) -> str:
 
 
 API_KEY = os.getenv("ANTHROPIC_API_KEY", "") or _secret("ANTHROPIC_API_KEY")  # nunca se muestra en pantalla
+
+
+def api_status() -> tuple[bool, str]:
+    if API_KEY:
+        return True, "ANTHROPIC_API_KEY configurada"
+    return False, "Falta ANTHROPIC_API_KEY"
+
+
+API_OK, API_STATUS = api_status()
 
 st.set_page_config(page_title="Fundamental Terminal", page_icon="▣", layout="wide")
 
@@ -651,7 +737,7 @@ with st.sidebar:
             if companies else "➕ Nueva empresa…")
     company = st.text_input("Nombre de la empresa (opcional, si no lo detecta del PDF)").strip() if pick.startswith("➕") else pick
     files = st.file_uploader("Balances (PDF)", type="pdf", accept_multiple_files=True)
-    go = st.button("Extraer y agregar", width="stretch")
+    go = st.button("ANALIZAR BALANCE", width="stretch", type="primary")
     st.markdown("---")
     st.markdown(
         '<div style="font-family:IBM Plex Mono,monospace;letter-spacing:.10em;'
@@ -660,7 +746,17 @@ with st.sidebar:
     )
     model = st.selectbox("Modelo Altman", list(MODELS), index=1,
                          help="Z'' EM suma 3,25 al Z'' y corre los cortes; es la versión para mercados emergentes.")
+    ok, status_text = api_status()
+    status_bg = "rgba(61,220,132,.12)" if ok else "rgba(255,98,98,.12)"
+    status_color = "#3ddc84" if ok else "#ff6262"
+    st.markdown(
+        f'<div style="margin-top:10px;padding:9px 10px;border:1px solid #263229;'
+        f'background:{status_bg};font-family:IBM Plex Mono,monospace;font-size:10px;'
+        f'color:{status_color};letter-spacing:.04em">● {status_text}</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
+    st.caption(f"Motor de extracción: {MODEL}")
     st.caption("Respaldo de datos")
     st.download_button("Descargar JSON", json.dumps(records, ensure_ascii=False, indent=1),
                        "balances.json", "application/json", width="stretch")
@@ -672,23 +768,28 @@ with st.sidebar:
 if go:
     flash = []
     if not files:
-        flash.append(("error", "Subí al menos un PDF."))
+        flash.append(("error", "No hay ningún PDF seleccionado."))
     elif not API_KEY:
-        flash.append(("error", "Falta configurar ANTHROPIC_API_KEY en el servidor (variable de entorno o secrets.toml)."))
+        flash.append((
+            "error",
+            "PDF cargado, pero falta ANTHROPIC_API_KEY. Configurala en Streamlit Cloud → Settings → Secrets."
+        ))
     else:
         last_company = None
         for f in files:
-            with st.spinner(f"Leyendo {f.name}… (puede tardar 30–90 s)"):
+            pdf_bytes = f.getvalue()
+            size_mb = len(pdf_bytes) / (1024 * 1024)
+            with st.spinner(f"Analizando {f.name} ({size_mb:.1f} MB)…"):
                 try:
-                    new = extract(f.getvalue(), API_KEY, f.name, company or None, MODEL)
-                    if new:
-                        commit(new)
-                        last_company = new[0]["company"]
-                        flash.append(("success", f"{f.name}: {len(new)} ejercicio(s) cargado(s) para {last_company}."))
-                    else:
-                        flash.append(("warning", f"{f.name}: no se detectaron ejercicios."))
+                    new = extract(pdf_bytes, API_KEY, f.name, company or None, MODEL)
+                    commit(new)
+                    last_company = new[0]["company"]
+                    flash.append((
+                        "success",
+                        f"✓ {f.name}: {len(new)} ejercicio(s) detectado(s) para {last_company}."
+                    ))
                 except Exception as exc:  # noqa: BLE001
-                    flash.append(("error", f"{f.name}: {exc}"))
+                    flash.append(("error", f"✕ {f.name}: {exc}"))
         if last_company:
             st.session_state["next_pick"] = last_company
     st.session_state["flash"] = flash
@@ -710,7 +811,18 @@ with st.sidebar:
 mine = [r for r in records if company and r["company"].lower() == company.lower()]
 if not mine:
     render_masthead(company or None, model)
-    st.info("Subí uno o más balances en PDF de la concesionaria y tocá **Extraer y agregar**.")
+    if files:
+        names = " · ".join(f.name for f in files)
+        if API_KEY:
+            st.success(f"PDF listo para analizar: {names}")
+            st.info("Ahora hacé clic en **ANALIZAR BALANCE**. La app enviará el PDF a Claude y luego mostrará Altman y Piotroski.")
+        else:
+            st.error("El PDF está cargado, pero falta configurar **ANTHROPIC_API_KEY**.")
+            st.markdown(
+                "**Streamlit Cloud:** Settings → Secrets → agregá `ANTHROPIC_API_KEY = \"sk-ant-...\"` → Save → Reboot."
+            )
+    else:
+        st.info("Subí uno o más balances en PDF de la concesionaria y luego tocá **ANALIZAR BALANCE**.")
     st.stop()
 
 mine = sorted(mine, key=lambda r: r["fy"])
