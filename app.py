@@ -1,8 +1,9 @@
-"""Fundamental Terminal — Altman Z-Score para empresas que NO cotizan (balances en PDF).
+"""Fundamental Terminal — Altman Z-Score + Piotroski F-Score para concesionarias viales que NO cotizan.
 
-Un solo archivo. Subís balances en PDF, Claude extrae los datos, la app acumula los ejercicios
-y arma el historial del Altman Z'' / Z' usando el patrimonio contable en X4.
-Requiere: streamlit, pandas, altair, pypdf, anthropic  +  una API key de Anthropic.
+Subís los balances en PDF, Claude los lee (la API key se configura UNA vez en el servidor, no aparece en la pantalla),
+la app acumula los ejercicios y calcula el historial de Altman y Piotroski.
+Requiere: streamlit, pandas, altair, pypdf, anthropic
+API key: variable de entorno ANTHROPIC_API_KEY o .streamlit/secrets.toml  ->  ANTHROPIC_API_KEY = "sk-ant-..."
 """
 from __future__ import annotations
 
@@ -18,11 +19,13 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-# ═════════════════════════ 1. MODELO ALTMAN ═════════════════════════
+# ═════════════════════════ 1. MODELOS ═════════════════════════
 
 FIELDS = [
     "current_assets", "current_liabilities", "total_assets", "total_liabilities",
     "equity", "retained_earnings", "ebit", "sales",
+    # extra para Piotroski
+    "net_income", "cfo", "long_term_debt", "cost_of_sales", "share_capital",
 ]
 FACTOR_NAMES = [
     "X1 Capital de trabajo / Activo",
@@ -31,12 +34,22 @@ FACTOR_NAMES = [
     "X4 Patrimonio neto / Pasivo",
     "X5 Ventas / Activo",
 ]
-# w = pesos de X1..X5 (0 = el factor no entra), const = constante, lo/hi = cortes
 MODELS = {
     "Z'' (no manufactureras)": dict(w=[6.56, 3.26, 6.72, 1.05, 0.0], const=0.0, lo=1.10, hi=2.60),
     "Z'' EM (mercados emergentes)": dict(w=[6.56, 3.26, 6.72, 1.05, 0.0], const=3.25, lo=4.15, hi=5.85),
     "Z' (privadas manufactureras)": dict(w=[0.717, 0.847, 3.107, 0.420, 0.998], const=0.0, lo=1.23, hi=2.90),
 }
+PIO_NAMES = [
+    "1 Resultado neto > 0",
+    "2 Flujo operativo (CFO) > 0",
+    "3 ROA sube vs. año anterior",
+    "4 CFO > Resultado neto (calidad de ganancias)",
+    "5 Deuda LP / Activo baja",
+    "6 Liquidez corriente sube",
+    "7 Sin aumento de capital social",
+    "8 Margen bruto sube",
+    "9 Rotación del activo sube",
+]
 
 
 def _num(v):
@@ -74,6 +87,53 @@ def compute(rec: dict, model: str) -> dict:
     return {"x": x, "contrib": contrib, "const": m["const"], "z": z, "zone": zone, "missing": missing}
 
 
+def piotroski(cur: dict, prev: dict | None) -> dict:
+    """F-Score de 9 criterios. Todos los criterios comparan RATIOS de cada año, así que la
+    reexpresión por inflación no los distorsiona. Sin año anterior cargado, los criterios 3,5,6,7,8,9 quedan n/d."""
+    def g(r, k):
+        return _num(r.get(k)) if r else None
+
+    roa = lambda r: _div(g(r, "net_income"), g(r, "total_assets"))
+    lev = lambda r: _div(g(r, "long_term_debt"), g(r, "total_assets"))
+    cr = lambda r: _div(g(r, "current_assets"), g(r, "current_liabilities"))
+    at = lambda r: _div(g(r, "sales"), g(r, "total_assets"))
+
+    def gm(r):
+        s, c = g(r, "sales"), g(r, "cost_of_sales")
+        return None if s in (None, 0) or c is None else (s - abs(c)) / s
+
+    def dlt(f):
+        a, b = f(cur), f(prev) if prev else None
+        return None if a is None or b is None else a - b
+
+    ni, cfo = g(cur, "net_income"), g(cur, "cfo")
+    d_lev = dlt(lev)
+    sc_c, sc_p = g(cur, "share_capital"), g(prev, "share_capital") if prev else None
+    d_roa, d_cr, d_gm, d_at = dlt(roa), dlt(cr), dlt(gm), dlt(at)
+    tests = [
+        None if ni is None else ni > 0,
+        None if cfo is None else cfo > 0,
+        None if d_roa is None else d_roa > 0,
+        None if ni is None or cfo is None else cfo > ni,
+        None if d_lev is None else (d_lev < 0 or lev(cur) == 0),
+        None if d_cr is None else d_cr > 0,
+        None if sc_c is None or sc_p is None else sc_c <= sc_p * 1.0001,
+        None if d_gm is None else d_gm > 0,
+        None if d_at is None else d_at > 0,
+    ]
+    n = sum(t is not None for t in tests)
+    score = sum(bool(t) for t in tests if t is not None)
+    if n == 0:
+        zone = "n/a"
+    elif score >= 8:
+        zone = "FUERTE"
+    elif score >= 4:
+        zone = "MEDIO"
+    else:
+        zone = "DÉBIL"
+    return {"tests": tests, "score": None if n == 0 else score, "n": n, "zone": zone}
+
+
 # ═════════════════════════ 2. ALMACENAMIENTO ═════════════════════════
 
 STORE = Path(__file__).resolve().parent / "data" / "balances.json"
@@ -96,32 +156,41 @@ def save(records: list[dict]) -> None:
 
 
 def merge(records: list[dict], new: list[dict]) -> list[dict]:
-    """Un registro por (empresa, FY). Prioridad: manual > balance propio > comparativo."""
+    """Un registro por (empresa, FY). Prioridad: manual > balance propio > comparativo.
+    Si el registro ganador no tiene un campo y el otro sí, se completa."""
     out = {(r["company"].strip().lower(), int(r["fy"])): r for r in records}
     for r in new:
         k = (r["company"].strip().lower(), int(r["fy"]))
         old = out.get(k)
-        if old is None or _PRIORITY.get(r.get("origin"), 0) >= _PRIORITY.get(old.get("origin"), 0):
+        if old is None:
             out[k] = r
+        elif _PRIORITY.get(r.get("origin"), 0) >= _PRIORITY.get(old.get("origin"), 0):
+            out[k] = {**{f: old.get(f) for f in FIELDS if old.get(f) is not None}, **{kk: v for kk, v in r.items() if v is not None}}
+        else:
+            for f in FIELDS:
+                if old.get(f) is None and r.get(f) is not None:
+                    old[f] = r[f]
     return sorted(out.values(), key=lambda r: (r["company"].lower(), int(r["fy"])))
 
 
 # ═════════════════════════ 3. EXTRACCIÓN DESDE PDF ═════════════════════════
 
 MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
-MAX_PAGES = 90  # la API procesa hasta ~100 páginas por PDF
+MAX_PAGES = 90
 KEYWORDS = re.compile(
     r"estado de situaci[oó]n|balance general|estado de resultados|estado del resultado|"
-    r"evoluci[oó]n del patrimonio|total del activo|total activo", re.I)
+    r"evoluci[oó]n del patrimonio|flujo de efectivo|total del activo|total activo", re.I)
 
 PROMPT = """Sos un analista contable argentino. Del PDF adjunto (estados contables de una concesionaria vial)
-extraé los datos para calcular el Altman Z-Score. Devolvé SOLO un JSON, sin texto ni markdown, con esta forma:
+extraé los datos para calcular el Altman Z-Score y el Piotroski F-Score. Devolvé SOLO un JSON, sin texto ni markdown, con esta forma:
 
 {"company": "razón social",
  "periods": [
   {"period_end": "YYYY-MM-DD", "column": "current" | "prior",
    "current_assets": n, "current_liabilities": n, "total_assets": n, "total_liabilities": n,
-   "equity": n, "retained_earnings": n, "ebit": n, "sales": n, "notes": "texto breve"}
+   "equity": n, "retained_earnings": n, "ebit": n, "sales": n,
+   "net_income": n, "cfo": n, "long_term_debt": n, "cost_of_sales": n, "share_capital": n,
+   "notes": "texto breve"}
  ]}
 
 Reglas:
@@ -131,11 +200,15 @@ Reglas:
 - ebit = resultado operativo antes de resultados financieros (intereses, diferencias de cambio, RECPAM, tenencia) y antes de impuesto a las ganancias.
   Si no hay esa línea, calculalo como resultado antes de impuesto menos resultados financieros netos. En "notes" aclará cómo lo obtuviste.
 - sales = ingresos operativos (peajes / concesión).
+- net_income = resultado neto del ejercicio (después de impuesto a las ganancias).
+- cfo = flujo neto de efectivo generado por (usado en) actividades operativas, del estado de flujo de efectivo de cada columna.
+- long_term_debt = deudas financieras NO corrientes (préstamos, obligaciones negociables, otras deudas financieras no corrientes). No incluyas proveedores ni deudas fiscales.
+- cost_of_sales = costo de los servicios prestados / costo de explotación del ejercicio (en positivo).
+- share_capital = capital social nominal (sin ajuste de capital).
 - Si un dato no figura, usá null. No inventes valores."""
 
 
 def select_pages(pdf_bytes: bytes) -> bytes:
-    """Si el PDF es muy largo, deja solo las páginas de estados contables."""
     from pypdf import PdfReader, PdfWriter
 
     reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -177,8 +250,7 @@ def normalize(result: dict, source: str, company: str | None = None) -> list[dic
             "fy": int(end[:4]), "period_end": end,
             "origin": "own" if p.get("column") == "current" else "comparative",
             "source": source,
-            **{k: p.get(k) for k in ("current_assets", "current_liabilities", "total_assets",
-                                      "total_liabilities", "equity", "retained_earnings", "ebit", "sales")},
+            **{k: p.get(k) for k in FIELDS},
             "notes": p.get("notes") or "",
         })
     return recs
@@ -190,7 +262,7 @@ def extract(pdf_bytes: bytes, api_key: str, source: str, company: str | None = N
     data = base64.standard_b64encode(select_pages(pdf_bytes)).decode()
     client = anthropic.Anthropic(api_key=api_key)
     msg = client.messages.create(
-        model=model, max_tokens=3000,
+        model=model, max_tokens=4000,
         messages=[{"role": "user", "content": [
             {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}},
             {"type": "text", "text": PROMPT}]}],
@@ -203,9 +275,11 @@ def extract(pdf_bytes: bytes, api_key: str, source: str, company: str | None = N
 def _secret(name: str) -> str:
     try:
         return str(st.secrets.get(name, "") or "")
-    except Exception:  # noqa: BLE001  (no hay secrets.toml)
+    except Exception:  # noqa: BLE001
         return ""
 
+
+API_KEY = os.getenv("ANTHROPIC_API_KEY", "") or _secret("ANTHROPIC_API_KEY")  # nunca se muestra en pantalla
 
 st.set_page_config(page_title="Fundamental Terminal", page_icon="▣", layout="wide")
 
@@ -271,7 +345,7 @@ def render_masthead(company: str | None, model: str, stmt: str = "") -> None:
     st.markdown(
         f"""<div class="ft-masthead"><div>
         <div class="ft-brand">Fundamental Terminal</div>
-        <div class="ft-title">Altman Z-Score · Empresas no cotizantes</div>
+        <div class="ft-title">Altman Z-Score + Piotroski F-Score · Concesionarias viales no cotizantes</div>
         <div class="ft-sub">{model} · patrimonio contable en X4</div>{tk}</div>
         <div class="ft-clock">Data: balances cargados (PDF){stmt_html}</div></div>""",
         unsafe_allow_html=True)
@@ -292,6 +366,7 @@ def _threshold_layer(levels):
         y="y:Q", text="label:N", color=alt.Color("color:N", scale=None), x=alt.value(4))
     return rules + texts
 
+
 if "records" not in st.session_state:
     st.session_state.records = load()
 records: list[dict] = st.session_state.records
@@ -303,7 +378,7 @@ def commit(new_records: list[dict]) -> None:
 
 
 # ───────────────────────── SIDEBAR ─────────────────────────
-if "next_pick" in st.session_state:  # selecciona la empresa recién cargada
+if "next_pick" in st.session_state:
     st.session_state["pick_company"] = st.session_state.pop("next_pick")
 
 with st.sidebar:
@@ -311,16 +386,11 @@ with st.sidebar:
     companies = sorted({r["company"] for r in records})
     pick = (st.selectbox("Empresa", companies + ["➕ Nueva empresa…"], key="pick_company")
             if companies else "➕ Nueva empresa…")
-    company = st.text_input("Nombre de la empresa").strip() if pick.startswith("➕") else pick
+    company = st.text_input("Nombre de la empresa (opcional, si no lo detecta del PDF)").strip() if pick.startswith("➕") else pick
     files = st.file_uploader("Balances (PDF)", type="pdf", accept_multiple_files=True)
-    api_key = st.text_input("API key de Anthropic", type="password",
-                            value=os.getenv("ANTHROPIC_API_KEY", "") or _secret("ANTHROPIC_API_KEY"))
-    with st.expander("Avanzado"):
-        ext_model = st.text_input("Modelo de extracción", value=MODEL,
-                                  help="Si da error de modelo, probá con claude-sonnet-4-6.")
     go = st.button("Extraer y agregar", width="stretch")
     st.markdown("---")
-    model = st.selectbox("Modelo", list(MODELS), index=1,
+    model = st.selectbox("Modelo Altman", list(MODELS), index=1,
                          help="Z'' EM suma 3,25 al Z'' y corre los cortes; es la versión para mercados emergentes.")
     st.markdown("---")
     st.caption("Respaldo de datos")
@@ -333,21 +403,26 @@ with st.sidebar:
 
 if go:
     flash = []
-    if not files or not company or not api_key:
-        flash.append(("error", "Falta el nombre de la empresa, la API key o algún PDF."))
+    if not files:
+        flash.append(("error", "Subí al menos un PDF."))
+    elif not API_KEY:
+        flash.append(("error", "Falta configurar ANTHROPIC_API_KEY en el servidor (variable de entorno o secrets.toml)."))
     else:
+        last_company = None
         for f in files:
             with st.spinner(f"Leyendo {f.name}… (puede tardar 30–90 s)"):
                 try:
-                    new = extract(f.getvalue(), api_key, f.name, company, ext_model)
+                    new = extract(f.getvalue(), API_KEY, f.name, company or None, MODEL)
                     if new:
                         commit(new)
-                        flash.append(("success", f"{f.name}: {len(new)} ejercicio(s) cargado(s)."))
+                        last_company = new[0]["company"]
+                        flash.append(("success", f"{f.name}: {len(new)} ejercicio(s) cargado(s) para {last_company}."))
                     else:
                         flash.append(("warning", f"{f.name}: no se detectaron ejercicios."))
                 except Exception as exc:  # noqa: BLE001
                     flash.append(("error", f"{f.name}: {exc}"))
-        st.session_state["next_pick"] = company
+        if last_company:
+            st.session_state["next_pick"] = last_company
     st.session_state["flash"] = flash
     st.rerun()
 
@@ -357,52 +432,63 @@ for _kind, _msg in st.session_state.pop("flash", []):
 with st.sidebar:
     st.markdown("---")
     st.markdown("**ABOUT THE MODELS**")
-    st.caption("Altman Z'' (1995): versión para empresas no manufactureras y mercados emergentes. "
-               "Z = 6,56 X1 + 3,26 X2 + 6,72 X3 + 1,05 X4. Cortes 1,10 / 2,60 (EM: +3,25 y 4,15 / 5,85). "
-               "X4 usa patrimonio contable porque la empresa no cotiza. No es una calificación crediticia.")
-    st.caption("Educational desk. Verificá los datos extraídos en la pestaña DATOS.")
+    st.caption("Altman Z'' (1995): Z = 6,56 X1 + 3,26 X2 + 6,72 X3 + 1,05 X4. Cortes 1,10 / 2,60 (EM: +3,25 y 4,15 / 5,85). "
+               "X4 usa patrimonio contable porque la empresa no cotiza.")
+    st.caption("Piotroski F-Score: 9 criterios binarios (rentabilidad, apalancamiento/liquidez, eficiencia). "
+               "8–9 fuerte · 4–7 medio · 0–3 débil. Necesita el ejercicio anterior cargado para los criterios de variación.")
+    st.caption("No son calificaciones crediticias. Verificá los datos extraídos en la pestaña DATOS.")
 
 # ───────────────────────── MAIN ─────────────────────────
 mine = [r for r in records if company and r["company"].lower() == company.lower()]
 if not mine:
     render_masthead(company or None, model)
-    st.info("Elegí o creá una empresa, subí uno o más balances en PDF y tocá **Extraer y agregar**.")
+    st.info("Subí uno o más balances en PDF de la concesionaria y tocá **Extraer y agregar**.")
     st.stop()
 
-rows, comp = [], []
-for r in sorted(mine, key=lambda r: r["fy"]):
+mine = sorted(mine, key=lambda r: r["fy"])
+by_fy = {int(r["fy"]): r for r in mine}
+rows, comp, pio = [], [], []
+for r in mine:
     c = compute(r, model)
-    rows.append({"FY": str(r["fy"]), "period end": r["period_end"], "Z-Score": None if c["z"] is None else round(c["z"], 2),
-                 "zone": c["zone"], **{f"X{i + 1}": None if v is None else round(v, 4) for i, v in enumerate(c["x"])},
+    p = piotroski(r, by_fy.get(int(r["fy"]) - 1))
+    rows.append({"FY": str(r["fy"]), "period end": r["period_end"],
+                 "Z-Score": None if c["z"] is None else round(c["z"], 2), "zone": c["zone"],
+                 "F-Score": p["score"], "criterios evaluados": f"{p['n']}/9", "F zone": p["zone"],
+                 **{f"X{i + 1}": None if v is None else round(v, 4) for i, v in enumerate(c["x"])},
                  "origen": r.get("origin", "")})
     comp.append(c)
+    pio.append(p)
 hist = pd.DataFrame(rows)
-last = comp[-1]
+last, last_p = comp[-1], pio[-1]
 m = MODELS[model]
-latest = sorted(mine, key=lambda r: r["fy"])[-1]
+latest = mine[-1]
 render_masthead(company, model, f"Financials: FY{latest['fy']} · period end {latest['period_end']}")
 
 _dc = {"SAFE": "normal", "GREY": "off", "DISTRESS": "inverse"}.get(last["zone"], "off")
+_dp = {"FUERTE": "normal", "MEDIO": "off", "DÉBIL": "inverse"}.get(last_p["zone"], "off")
 zval = "—" if last["z"] is None else f"{last['z']:.2f}"
+fval = "—" if last_p["score"] is None else f"{last_p['score']}/9"
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("EMPRESA", company)
-c2.metric("Z-SCORE", zval, last["zone"], delta_color=_dc)
-c3.metric("ACTIVO TOTAL", _fmt_num(latest.get("total_assets")))
-c4.metric("PATRIMONIO NETO", _fmt_num(latest.get("equity")))
-c5.metric("EJERCICIOS", len(hist))
+c2.metric("ALTMAN Z", zval, last["zone"], delta_color=_dc)
+c3.metric("PIOTROSKI F", fval, last_p["zone"], delta_color=_dp)
+c4.metric("ACTIVO TOTAL", _fmt_num(latest.get("total_assets")))
+c5.metric("PATRIMONIO NETO", _fmt_num(latest.get("equity")))
 c6.metric("FY", str(latest["fy"]))
+if last_p["n"] < 9:
+    st.caption(f"Piotroski FY{latest['fy']}: {last_p['n']} de 9 criterios evaluables (falta el ejercicio anterior o algún dato). Mirá la pestaña PIOTROSKI.")
 
-tab_h, tab_c, tab_g, tab_d, tab_f = st.tabs(["HISTORIAL", "COMPONENTES", "CHARTS", "DATOS", "FORMULAS"])
+tab_h, tab_c, tab_p, tab_g, tab_d, tab_f = st.tabs(["HISTORIAL", "ALTMAN", "PIOTROSKI", "CHARTS", "DATOS", "FORMULAS"])
 
 with tab_h:
     st.dataframe(hist, width="stretch", hide_index=True)
-    zs = [z for z in hist["Z-Score"] if z is not None]
+    zs = [z for z in hist["Z-Score"] if z is not None and not pd.isna(z)]
     if zs:
-        st.markdown(f"**Promedio:** `{sum(zs) / len(zs):.2f}` · Mín `{min(zs):.2f}` · Máx `{max(zs):.2f}`")
+        st.markdown(f"**Altman promedio:** `{sum(zs) / len(zs):.2f}` · Mín `{min(zs):.2f}` · Máx `{max(zs):.2f}`")
     st.caption("Los ratios usan valores de una misma columna del balance, por lo que la reexpresión por inflación no los distorsiona.")
 
 with tab_c:
-    yr = st.selectbox("Ejercicio", list(hist["FY"])[::-1])
+    yr = st.selectbox("Ejercicio", list(hist["FY"])[::-1], key="yr_altman")
     c = comp[list(hist["FY"]).index(yr)]
     st.dataframe(pd.DataFrame({
         "factor": FACTOR_NAMES, "peso": m["w"],
@@ -417,14 +503,25 @@ with tab_c:
     if notes:
         st.caption("Notas de extracción: " + " | ".join(notes))
 
-
+with tab_p:
+    yr2 = st.selectbox("Ejercicio", list(hist["FY"])[::-1], key="yr_pio")
+    i2 = list(hist["FY"]).index(yr2)
+    p = pio[i2]
+    sym = {True: "✅ 1", False: "❌ 0", None: "— n/d"}
+    st.dataframe(pd.DataFrame({"criterio": PIO_NAMES, "resultado": [sym[t] for t in p["tests"]]}),
+                 width="stretch", hide_index=True)
+    st.markdown(f"**F-Score = {p['score'] if p['score'] is not None else 'n/a'} / 9** · {p['zone']} · "
+                f"criterios evaluados: {p['n']}/9")
+    if p["n"] < 9:
+        st.warning("Hay criterios sin dato. Cargá también el balance del ejercicio anterior (o completá los campos en DATOS: "
+                   "net_income, cfo, long_term_debt, cost_of_sales, share_capital).")
 
 with tab_g:
     st.subheader("Evolución de los indicadores")
     st.caption("Ejercicios cargados, del más antiguo al más reciente.")
     d = hist.dropna(subset=["Z-Score"])
     if d.empty:
-        st.info("No hay datos suficientes para graficar.")
+        st.info("No hay datos suficientes para graficar Altman.")
     else:
         years = list(d["FY"])
         lo = min(m["lo"], float(d["Z-Score"].min())) - 0.5
@@ -456,7 +553,19 @@ with tab_g:
             x=alt.X("FY:N", sort=years), y="Z-Score:Q", text=alt.Text("Z-Score:Q", format=".2f"))
         st.altair_chart(_style_chart((zones + bars + total + total_lbl).properties(
             height=380, title="Contribución de X1–X5 por año")), width="stretch")
-        st.caption("Barras: peso × ratio de cada factor (las negativas bajan el Z). El rombo ámbar es el Z-Score total.")
+        st.caption("Barras: peso × ratio de cada factor. El rombo ámbar es el Z-Score total.")
+
+    dp = hist.dropna(subset=["F-Score"])
+    if not dp.empty:
+        yrs = list(dp["FY"])
+        fb = alt.Chart(dp).encode(
+            x=alt.X("FY:N", title="Fiscal year", sort=yrs, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("F-Score:Q", title="F-Score", scale=alt.Scale(domain=[0, 9])),
+            tooltip=["FY", "F-Score", "criterios evaluados", "F zone"])
+        fbars = fb.mark_bar(color="#3ddc84", opacity=0.85)
+        flbl = fb.mark_text(dy=-8, color="#e8f3e9", fontSize=12, font="IBM Plex Mono").encode(text="F-Score:Q")
+        fz = _threshold_layer([(8, "FUERTE ≥ 8", "#3ddc84"), (3.5, "DÉBIL ≤ 3", "#ff5c5c")])
+        st.altair_chart(_style_chart((fz + fbars + flbl).properties(height=300, title="Piotroski F-Score")), width="stretch")
 
 with tab_d:
     st.caption("Podés corregir valores, agregar un ejercicio a mano o borrar filas. Luego tocá **Guardar cambios**.")
@@ -477,8 +586,8 @@ with tab_d:
 
 with tab_f:
     st.markdown(r"""
-**X1** = (Activo corriente − Pasivo corriente) / Activo total · **X2** = Resultados acumulados / Activo total ·
-**X3** = EBIT / Activo total · **X4** = **Patrimonio neto contable** / Pasivo total · **X5** = Ventas / Activo total
+**Altman** — **X1** = (Act. corriente − Pas. corriente) / Activo · **X2** = Resultados acumulados / Activo ·
+**X3** = EBIT / Activo · **X4** = **Patrimonio neto contable** / Pasivo · **X5** = Ventas / Activo
 
 | Modelo | Fórmula | Cortes (distress / safe) |
 |---|---|---|
@@ -486,8 +595,11 @@ with tab_f:
 | Z'' EM | 3,25 + Z'' | 4,15 / 5,85 |
 | Z' | 0,717·X1 + 0,847·X2 + 3,107·X3 + 0,420·X4 + 0,998·X5 | 1,23 / 2,90 |
 
-Como la empresa no cotiza, X4 no puede usar capitalización bursátil: se reemplaza por el valor contable del patrimonio.
-Resultados acumulados = reservas + resultados no asignados (sin capital ni ajuste de capital). EBIT = resultado operativo antes de resultados financieros e impuestos.
+**Piotroski** — 1 punto por cada criterio cumplido:
+1. Resultado neto > 0 · 2. CFO > 0 · 3. ROA (RN/Activo) mayor que el año anterior · 4. CFO > Resultado neto ·
+5. Deuda financiera no corriente / Activo menor que el año anterior · 6. Liquidez corriente mayor ·
+7. Capital social nominal sin aumento · 8. Margen bruto ((Ventas − Costo)/Ventas) mayor · 9. Rotación (Ventas/Activo) mayor.
+Puntaje 8–9 fuerte, 4–7 medio, 0–3 débil. Para una no cotizante, el criterio 7 se mide con el capital social nominal.
 """)
 
 
