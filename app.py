@@ -305,62 +305,264 @@ st.set_page_config(page_title="Fundamental Terminal", page_icon="▣", layout="w
 BLOOMBERG_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
-html, body, [class*="css"] { font-family: "IBM Plex Sans", "Segoe UI", sans-serif; }
-.stApp { background: radial-gradient(1200px 600px at 10% -10%, #1a2420 0%, #0b0e11 45%, #07090b 100%); color: #d7e0d8; }
-header[data-testid="stHeader"] { background: #0b0e11; border-bottom: 1px solid #1f2a22; }
-section[data-testid="stSidebar"] { background: #0a0d10; border-right: 1px solid #1f2a22; }
-section[data-testid="stSidebar"] * { color: #c5d0c6; }
+
+:root {
+  --bg: #07090b;
+  --panel: #0d1110;
+  --panel2: #111714;
+  --line: #263229;
+  --muted: #7e8c81;
+  --text: #e8f0e9;
+  --amber: #f5a623;
+  --amber2: #ffbf45;
+  --green: #3ddc84;
+  --red: #ff6262;
+}
+
+html, body, [class*="css"] {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.stApp {
+  background:
+    radial-gradient(900px 480px at 10% -8%, #18221d 0%, #0b0e11 48%, #07090b 100%);
+  color: var(--text);
+}
+
+header[data-testid="stHeader"] {
+  background: #090c0e;
+  border-bottom: 1px solid #1c251f;
+}
+
+section[data-testid="stSidebar"] {
+  background: #080b0d;
+  border-right: 1px solid #1d2620;
+}
+
+section[data-testid="stSidebar"] * {
+  color: #cbd4cc;
+}
+
 section[data-testid="stSidebar"] input,
 section[data-testid="stSidebar"] [data-baseweb="select"] > div,
-section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] { background: #111714 !important; border-color: #243328 !important; }
-.block-container { padding-top: 4.5rem; max-width: 1480px; }
-h1, h2, h3 { font-family: "IBM Plex Sans", sans-serif; letter-spacing: 0.04em; }
-.ft-masthead { display: flex; justify-content: space-between; align-items: flex-end; border: 1px solid #243328;
-  background: linear-gradient(90deg, #101612 0%, #0d1210 60%, #151208 100%); padding: 14px 18px 12px 18px; margin-bottom: 14px; }
-.ft-brand { font-family: "IBM Plex Mono", monospace; color: #f5a623; font-weight: 600; font-size: 13px;
-  letter-spacing: 0.28em; text-transform: uppercase; line-height: 1.4; }
-.ft-title { font-size: 28px; font-weight: 700; color: #eef6ef; line-height: 1.1; margin-top: 4px; }
-.ft-sub { color: #7f8f82; font-size: 13px; margin-top: 4px; }
-.ft-clock { text-align: right; font-family: "IBM Plex Mono", monospace; color: #9aa89b; font-size: 12px; }
-.ft-ticker { color: #f5a623; font-size: 22px; font-weight: 600; }
-div[data-testid="stMetric"] { background: #111714; border: 1px solid #243328; padding: 12px 8px; text-align: center;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; }
-div[data-testid="stMetric"] [data-testid="stMetricLabel"],
-div[data-testid="stMetric"] [data-testid="stMetricValue"],
-div[data-testid="stMetric"] [data-testid="stMetricDelta"] { width: 100%; justify-content: center; text-align: center; }
-div[data-testid="stMetric"] [data-testid="stMetricLabel"] *,
-div[data-testid="stMetric"] [data-testid="stMetricValue"] *,
-div[data-testid="stMetric"] [data-testid="stMetricDelta"] * { white-space: normal !important; overflow: visible !important;
-  text-overflow: clip !important; text-align: center; justify-content: center; }
-div[data-testid="stMetric"] [data-testid="stMetricValue"] > div { font-size: 1.7rem; line-height: 1.2; }
-div[data-testid="stMetric"] label { color: #8b9a8d !important; font-family: "IBM Plex Mono", monospace;
-  letter-spacing: 0.12em; font-size: 11px !important; }
-div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-family: "IBM Plex Mono", monospace; color: #e8f3e9; }
-h2 { color: #c3d3c5; font-weight: 700; }
-.stTabs [data-baseweb="tab-list"] { gap: 26px; background: transparent; border-bottom: 1px solid #243328; }
-.stTabs [data-baseweb="tab"] { background: transparent; color: #eef6ef; font-family: "IBM Plex Sans", sans-serif;
-  font-weight: 500; font-size: 14px; letter-spacing: 0.01em; padding-left: 0; padding-right: 0; }
-.stTabs [aria-selected="true"] { color: #f5a623 !important; }
-.stTabs [data-baseweb="tab-highlight"] { background-color: #f5a623 !important; }
-.ft-cards { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin: 6px 0 24px 0; }
-.ft-card { background: #111714; border: 1px solid #243328; padding: 16px 8px; text-align: center; display: flex;
-  flex-direction: column; align-items: center; justify-content: center; gap: 7px; min-height: 112px; }
-.ft-clabel { font-family: "IBM Plex Mono", monospace; color: #8b9a8d; letter-spacing: 0.12em; font-size: 11px; text-transform: uppercase; }
-.ft-cvalue { font-family: "IBM Plex Mono", monospace; color: #eef6ef; font-size: 1.9rem; line-height: 1.15; }
-.ft-cvalue.sm { font-size: 1.05rem; word-break: break-word; }
-.ft-pill { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 11px; letter-spacing: 0.03em; }
-.ft-pill.good { background: rgba(61,220,132,.16); color: #3ddc84; }
-.ft-pill.mid { background: rgba(245,166,35,.16); color: #f5a623; }
-.ft-pill.bad { background: rgba(255,92,92,.16); color: #ff5c5c; }
-section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] * { color: #8b9a8d; }
-@media (max-width: 900px) { .ft-cards { grid-template-columns: repeat(3, 1fr); } }
-.stButton>button { background: #f5a623; color: #111; border: 0; font-weight: 700; letter-spacing: 0.08em;
-  text-transform: uppercase; font-family: "IBM Plex Mono", monospace; }
-.stButton>button:hover { background: #ffc056; color: #111; }
-hr { border-color: #243328; }
-.stDataFrame { border: 1px solid #243328; }
+section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+  background: #0f1317 !important;
+  border: 1px solid #202a24 !important;
+  border-radius: 8px !important;
+}
+
+section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+  min-height: 90px;
+}
+
+.block-container {
+  padding-top: 4.2rem;
+  padding-bottom: 3rem;
+  max-width: 1480px;
+}
+
+h1, h2, h3 {
+  font-family: "IBM Plex Sans", sans-serif;
+  letter-spacing: .015em;
+}
+
+h2 {
+  color: #d9e2db;
+  font-weight: 600;
+}
+
+.ft-masthead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid #263229;
+  background: linear-gradient(90deg, #101612 0%, #0d1210 58%, #17140b 100%);
+  padding: 15px 18px 14px;
+  margin-bottom: 14px;
+  min-height: 118px;
+}
+
+.ft-brand {
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--amber);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: .30em;
+  text-transform: uppercase;
+}
+
+.ft-title {
+  font-size: 27px;
+  font-weight: 700;
+  color: #eef5ef;
+  line-height: 1.08;
+  margin-top: 4px;
+}
+
+.ft-sub {
+  color: #819084;
+  font-size: 12px;
+  margin-top: 5px;
+}
+
+.ft-clock {
+  text-align: right;
+  font-family: "IBM Plex Mono", monospace;
+  color: #9aa79c;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.ft-ticker {
+  color: var(--amber);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.ft-company {
+  color: #9ca89f;
+  font-weight: 600;
+  font-size: 14px;
+  margin-left: 7px;
+}
+
+.ft-cards {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+  margin: 4px 0 22px;
+}
+
+.ft-card {
+  background: rgba(17,23,20,.94);
+  border: 1px solid #263229;
+  min-height: 105px;
+  padding: 13px 8px 12px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.ft-clabel {
+  font-family: "IBM Plex Mono", monospace;
+  color: #89978c;
+  letter-spacing: .12em;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.ft-cvalue {
+  font-family: "IBM Plex Mono", monospace;
+  color: #eef4ef;
+  font-size: 1.78rem;
+  line-height: 1.12;
+}
+
+.ft-cvalue.sm {
+  font-size: 1.02rem;
+  word-break: break-word;
+}
+
+.ft-pill {
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 10px;
+  letter-spacing: .025em;
+}
+
+.ft-pill.good {
+  background: rgba(61,220,132,.16);
+  color: var(--green);
+}
+
+.ft-pill.mid {
+  background: rgba(245,166,35,.16);
+  color: var(--amber2);
+}
+
+.ft-pill.bad {
+  background: rgba(255,98,98,.15);
+  color: var(--red);
+}
+
+.stTabs [data-baseweb="tab-list"] {
+  gap: 22px;
+  background: transparent;
+  border-bottom: 1px solid #263229;
+}
+
+.stTabs [data-baseweb="tab"] {
+  background: transparent;
+  color: #e5ece6;
+  font-family: "IBM Plex Sans", sans-serif;
+  font-weight: 500;
+  font-size: 13px;
+  padding: 0 0 11px;
+}
+
+.stTabs [aria-selected="true"] {
+  color: var(--amber) !important;
+}
+
+.stTabs [data-baseweb="tab-highlight"] {
+  background-color: var(--amber) !important;
+  height: 2px;
+}
+
+div[data-testid="stDataFrame"] {
+  border: 1px solid #263229;
+}
+
+[data-testid="stMetric"] {
+  background: #111714;
+  border: 1px solid #263229;
+}
+
+.stButton > button {
+  background: var(--amber);
+  color: #111;
+  border: 0;
+  border-radius: 6px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.stButton > button:hover {
+  background: var(--amber2);
+  color: #111;
+}
+
+.stDownloadButton > button {
+  border-radius: 6px;
+}
+
+hr {
+  border-color: #263229;
+}
+
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {
+  color: #7f8c82;
+}
+
+@media (max-width: 1100px) {
+  .ft-cards { grid-template-columns: repeat(3, 1fr); }
+}
+
+@media (max-width: 700px) {
+  .ft-masthead { flex-direction: column; align-items: flex-start; gap: 14px; }
+  .ft-clock { text-align: left; }
+  .ft-cards { grid-template-columns: repeat(2, 1fr); }
+}
 </style>
 """
+
 st.markdown(BLOOMBERG_CSS, unsafe_allow_html=True)
 
 
@@ -374,16 +576,37 @@ def _fmt_num(v) -> str:
 
 
 def render_masthead(company: str | None, model: str, stmt: str = "") -> None:
-    tk = (f'<div style="margin-top:8px"><span class="ft-ticker">{escape(company)}</span> '
-          f'<span style="color:#9aa89b;font-weight:600;font-size:14px;margin-left:6px">Concesionaria vial · no cotiza</span></div>') if company else ""
-    stmt_html = f"<br/>{stmt}" if stmt else ""
+    if company:
+        identity = (
+            f'<div style="margin-top:8px">'
+            f'<span class="ft-ticker">{escape(company)}</span>'
+            f'<span class="ft-company">Concesionaria vial · no cotiza</span>'
+            f'</div>'
+        )
+    else:
+        identity = ""
+
+    stmt_html = f"<br/>{escape(stmt)}" if stmt else ""
+
     st.markdown(
-        f"""<div class="ft-masthead"><div>
-        <div class="ft-brand">Fundamental Terminal</div>
-        <div class="ft-title">Fundamental Analytics · Concesiones viales</div>
-        <div class="ft-sub">Piotroski F-Score · Altman Z-Score ({model})</div>{tk}</div>
-        <div class="ft-clock">Data: balances contables (PDF) <span style="color:#f5a623">|</span> Market: no cotiza{stmt_html}</div></div>""",
-        unsafe_allow_html=True)
+        f"""
+        <div class="ft-masthead">
+          <div>
+            <div class="ft-brand">Fundamental Terminal</div>
+            <div class="ft-title">Fundamental Analytics</div>
+            <div class="ft-sub">Piotroski F-Score · Altman Z-Score · Concesiones viales</div>
+            {identity}
+          </div>
+          <div class="ft-clock">
+            Data: balances contables (PDF)
+            <span style="color:#f5a623"> | </span>
+            Market: no cotiza
+            {stmt_html}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _style_chart(ch):
@@ -417,7 +640,12 @@ if "next_pick" in st.session_state:
     st.session_state["pick_company"] = st.session_state.pop("next_pick")
 
 with st.sidebar:
-    st.markdown("**COMMAND**")
+    st.markdown(
+        '<div style="font-family:IBM Plex Mono,monospace;letter-spacing:.12em;'
+        'color:#e7eee8;font-size:13px;font-weight:600">COMMAND</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
     companies = sorted({r["company"] for r in records})
     pick = (st.selectbox("Empresa", companies + ["➕ Nueva empresa…"], key="pick_company")
             if companies else "➕ Nueva empresa…")
@@ -425,6 +653,11 @@ with st.sidebar:
     files = st.file_uploader("Balances (PDF)", type="pdf", accept_multiple_files=True)
     go = st.button("Extraer y agregar", width="stretch")
     st.markdown("---")
+    st.markdown(
+        '<div style="font-family:IBM Plex Mono,monospace;letter-spacing:.10em;'
+        'color:#e7eee8;font-size:12px;font-weight:600">MODEL</div>',
+        unsafe_allow_html=True,
+    )
     model = st.selectbox("Modelo Altman", list(MODELS), index=1,
                          help="Z'' EM suma 3,25 al Z'' y corre los cortes; es la versión para mercados emergentes.")
     st.markdown("---")
@@ -538,6 +771,7 @@ cards([
     ("FY", str(latest["fy"]), "", "none"),
 ])
 
+st.markdown('<div style="height:2px"></div>', unsafe_allow_html=True)
 tab_o, tab_p, tab_c, tab_h, tab_f, tab_g, tab_d = st.tabs(
     ["OVERVIEW", "PIOTROSKI", "ALTMAN", "HISTORIAL", "FORMULAS", "CHARTS", "DATOS"])
 
@@ -666,6 +900,7 @@ with tab_f:
 7. Capital social nominal sin aumento · 8. Margen bruto ((Ventas − Costo)/Ventas) mayor · 9. Rotación (Ventas/Activo) mayor.
 Puntaje 8–9 fuerte, 4–7 medio, 0–3 débil. Para una no cotizante, el criterio 7 se mide con el capital social nominal.
 """)
+
 
 
 
