@@ -18,6 +18,7 @@ from pathlib import Path
 import altair as alt
 import pandas as pd
 import streamlit as st
+from html import escape
 
 # ═════════════════════════ 1. MODELOS ═════════════════════════
 
@@ -88,8 +89,8 @@ def compute(rec: dict, model: str) -> dict:
 
 
 def piotroski(cur: dict, prev: dict | None) -> dict:
-    """F-Score de 9 criterios. Todos los criterios comparan RATIOS de cada año, así que la
-    reexpresión por inflación no los distorsiona. Sin año anterior cargado, los criterios 3,5,6,7,8,9 quedan n/d."""
+    """F-Score de 9 criterios. Compara RATIOS de cada año (la inflación no los distorsiona).
+    Sin año anterior cargado, los criterios de variación quedan n/d."""
     def g(r, k):
         return _num(r.get(k)) if r else None
 
@@ -99,39 +100,57 @@ def piotroski(cur: dict, prev: dict | None) -> dict:
     at = lambda r: _div(g(r, "sales"), g(r, "total_assets"))
 
     def gm(r):
-        s, c = g(r, "sales"), g(r, "cost_of_sales")
-        return None if s in (None, 0) or c is None else (s - abs(c)) / s
+        s_, c_ = g(r, "sales"), g(r, "cost_of_sales")
+        return None if s_ in (None, 0) or c_ is None else (s_ - abs(c_)) / s_
 
     def dlt(f):
-        a, b = f(cur), f(prev) if prev else None
-        return None if a is None or b is None else a - b
+        x, y = f(cur), f(prev) if prev else None
+        return None if x is None or y is None else x - y
+
+    pct = lambda v: "n/d" if v is None else f"{v * 100:.2f}%"
+    num = lambda v: "n/d" if v is None else f"{v:.2f}"
+
+    def big(v):
+        if v is None:
+            return "n/d"
+        for lim, suf in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+            if abs(v) >= lim:
+                return f"{v / lim:,.2f}{suf}"
+        return f"{v:,.0f}"
 
     ni, cfo = g(cur, "net_income"), g(cur, "cfo")
-    d_lev = dlt(lev)
-    sc_c, sc_p = g(cur, "share_capital"), g(prev, "share_capital") if prev else None
-    d_roa, d_cr, d_gm, d_at = dlt(roa), dlt(cr), dlt(gm), dlt(at)
-    tests = [
-        None if ni is None else ni > 0,
-        None if cfo is None else cfo > 0,
-        None if d_roa is None else d_roa > 0,
-        None if ni is None or cfo is None else cfo > ni,
-        None if d_lev is None else (d_lev < 0 or lev(cur) == 0),
-        None if d_cr is None else d_cr > 0,
-        None if sc_c is None or sc_p is None else sc_c <= sc_p * 1.0001,
-        None if d_gm is None else d_gm > 0,
-        None if d_at is None else d_at > 0,
+    d_roa, d_lev, d_cr, d_gm, d_at = dlt(roa), dlt(lev), dlt(cr), dlt(gm), dlt(at)
+    sc_c, sc_p = g(cur, "share_capital"), (g(prev, "share_capital") if prev else None)
+    spec = [
+        ("F_ROA", "Positive ROA", None if ni is None else ni > 0, f"ROA_t = {pct(roa(cur))}"),
+        ("F_CFO", "Positive operating cash flow", None if cfo is None else cfo > 0, f"CFO_t = {big(cfo)}"),
+        ("F_dROA", "ROA improving", None if d_roa is None else d_roa > 0,
+         f"ROA_t = {pct(roa(cur))} vs ROA_t-1 = {pct(roa(prev) if prev else None)}"),
+        ("F_ACCRUAL", "CFO > Net income", None if ni is None or cfo is None else cfo > ni,
+         f"CFO = {big(cfo)} · NI = {big(ni)}"),
+        ("F_dLEVER", "Lower LT debt / assets", None if d_lev is None else (d_lev < 0 or lev(cur) == 0),
+         f"LTD/TA_t = {pct(lev(cur))} vs LTD/TA_t-1 = {pct(lev(prev) if prev else None)}"),
+        ("F_dLIQUID", "Higher current ratio", None if d_cr is None else d_cr > 0,
+         f"CR_t = {num(cr(cur))} vs CR_t-1 = {num(cr(prev) if prev else None)}"),
+        ("F_EQ_OFFER", "No new equity issued", None if sc_c is None or sc_p is None else sc_c <= sc_p * 1.0001,
+         f"Capital social_t = {big(sc_c)} vs t-1 = {big(sc_p)}"),
+        ("F_dMARGIN", "Higher gross margin", None if d_gm is None else d_gm > 0,
+         f"GM_t = {pct(gm(cur))} vs GM_t-1 = {pct(gm(prev) if prev else None)}"),
+        ("F_dTURN", "Higher asset turnover", None if d_at is None else d_at > 0,
+         f"AT_t = {num(at(cur))} vs AT_t-1 = {num(at(prev) if prev else None)}"),
     ]
+    tests = [t[2] for t in spec]
     n = sum(t is not None for t in tests)
     score = sum(bool(t) for t in tests if t is not None)
     if n == 0:
         zone = "n/a"
     elif score >= 8:
-        zone = "FUERTE"
+        zone = "HIGH QUALITY"
     elif score >= 4:
-        zone = "MEDIO"
+        zone = "MEDIUM"
     else:
-        zone = "DÉBIL"
-    return {"tests": tests, "score": None if n == 0 else score, "n": n, "zone": zone}
+        zone = "LOW QUALITY"
+    return {"tests": tests, "spec": spec, "score": None if n == 0 else score, "n": n, "zone": zone}
 
 
 # ═════════════════════════ 2. ALMACENAMIENTO ═════════════════════════
@@ -317,9 +336,24 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] > div { font-size: 1.7
 div[data-testid="stMetric"] label { color: #8b9a8d !important; font-family: "IBM Plex Mono", monospace;
   letter-spacing: 0.12em; font-size: 11px !important; }
 div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-family: "IBM Plex Mono", monospace; color: #e8f3e9; }
-.stTabs [data-baseweb="tab-list"] { gap: 4px; background: #0d1110; border-bottom: 1px solid #243328; }
-.stTabs [data-baseweb="tab"] { background: #0d1110; color: #8b9a8d; font-family: "IBM Plex Mono", monospace; letter-spacing: 0.08em; }
-.stTabs [aria-selected="true"] { color: #f5a623 !important; border-bottom: 2px solid #f5a623; }
+h2 { color: #c3d3c5; font-weight: 700; }
+.stTabs [data-baseweb="tab-list"] { gap: 26px; background: transparent; border-bottom: 1px solid #243328; }
+.stTabs [data-baseweb="tab"] { background: transparent; color: #eef6ef; font-family: "IBM Plex Sans", sans-serif;
+  font-weight: 500; font-size: 14px; letter-spacing: 0.01em; padding-left: 0; padding-right: 0; }
+.stTabs [aria-selected="true"] { color: #f5a623 !important; }
+.stTabs [data-baseweb="tab-highlight"] { background-color: #f5a623 !important; }
+.ft-cards { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin: 6px 0 24px 0; }
+.ft-card { background: #111714; border: 1px solid #243328; padding: 16px 8px; text-align: center; display: flex;
+  flex-direction: column; align-items: center; justify-content: center; gap: 7px; min-height: 112px; }
+.ft-clabel { font-family: "IBM Plex Mono", monospace; color: #8b9a8d; letter-spacing: 0.12em; font-size: 11px; text-transform: uppercase; }
+.ft-cvalue { font-family: "IBM Plex Mono", monospace; color: #eef6ef; font-size: 1.9rem; line-height: 1.15; }
+.ft-cvalue.sm { font-size: 1.05rem; word-break: break-word; }
+.ft-pill { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 11px; letter-spacing: 0.03em; }
+.ft-pill.good { background: rgba(61,220,132,.16); color: #3ddc84; }
+.ft-pill.mid { background: rgba(245,166,35,.16); color: #f5a623; }
+.ft-pill.bad { background: rgba(255,92,92,.16); color: #ff5c5c; }
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] * { color: #8b9a8d; }
+@media (max-width: 900px) { .ft-cards { grid-template-columns: repeat(3, 1fr); } }
 .stButton>button { background: #f5a623; color: #111; border: 0; font-weight: 700; letter-spacing: 0.08em;
   text-transform: uppercase; font-family: "IBM Plex Mono", monospace; }
 .stButton>button:hover { background: #ffc056; color: #111; }
@@ -340,14 +374,15 @@ def _fmt_num(v) -> str:
 
 
 def render_masthead(company: str | None, model: str, stmt: str = "") -> None:
-    tk = f'<div class="ft-ticker">{company}</div>' if company else ""
+    tk = (f'<div style="margin-top:8px"><span class="ft-ticker">{escape(company)}</span> '
+          f'<span style="color:#9aa89b;font-weight:600;font-size:14px;margin-left:6px">Concesionaria vial · no cotiza</span></div>') if company else ""
     stmt_html = f"<br/>{stmt}" if stmt else ""
     st.markdown(
         f"""<div class="ft-masthead"><div>
         <div class="ft-brand">Fundamental Terminal</div>
-        <div class="ft-title">Altman Z-Score + Piotroski F-Score · Concesionarias viales no cotizantes</div>
-        <div class="ft-sub">{model} · patrimonio contable en X4</div>{tk}</div>
-        <div class="ft-clock">Data: balances cargados (PDF){stmt_html}</div></div>""",
+        <div class="ft-title">Fundamental Analytics · Concesiones viales</div>
+        <div class="ft-sub">Piotroski F-Score · Altman Z-Score ({model})</div>{tk}</div>
+        <div class="ft-clock">Data: balances contables (PDF) <span style="color:#f5a623">|</span> Market: no cotiza{stmt_html}</div></div>""",
         unsafe_allow_html=True)
 
 
@@ -435,7 +470,7 @@ with st.sidebar:
     st.caption("Altman Z'' (1995): Z = 6,56 X1 + 3,26 X2 + 6,72 X3 + 1,05 X4. Cortes 1,10 / 2,60 (EM: +3,25 y 4,15 / 5,85). "
                "X4 usa patrimonio contable porque la empresa no cotiza.")
     st.caption("Piotroski F-Score: 9 criterios binarios (rentabilidad, apalancamiento/liquidez, eficiencia). "
-               "8–9 fuerte · 4–7 medio · 0–3 débil. Necesita el ejercicio anterior cargado para los criterios de variación.")
+               "8–9 high quality · 4–7 medium · 0–3 low quality. Necesita el ejercicio anterior cargado para los criterios de variación.")
     st.caption("No son calificaciones crediticias. Verificá los datos extraídos en la pestaña DATOS.")
 
 # ───────────────────────── MAIN ─────────────────────────
@@ -464,37 +499,73 @@ m = MODELS[model]
 latest = mine[-1]
 render_masthead(company, model, f"Financials: FY{latest['fy']} · period end {latest['period_end']}")
 
-_dc = {"SAFE": "normal", "GREY": "off", "DISTRESS": "inverse"}.get(last["zone"], "off")
-_dp = {"FUERTE": "normal", "MEDIO": "off", "DÉBIL": "inverse"}.get(last_p["zone"], "off")
+ZK = {"SAFE": "good", "GREY": "mid", "DISTRESS": "bad"}
+PK = {"HIGH QUALITY": "good", "MEDIUM": "mid", "LOW QUALITY": "bad"}
+ARROW = {"good": "↑", "mid": "→", "bad": "↓", "none": ""}
+
+
+def cards(items) -> None:
+    h = '<div class="ft-cards">'
+    for label, value, pill, kind in items:
+        sm = " sm" if len(str(value)) > 10 else ""
+        p = f'<div class="ft-pill {kind}">{ARROW[kind]} {pill}</div>' if pill else ""
+        h += f'<div class="ft-card"><div class="ft-clabel">{label}</div><div class="ft-cvalue{sm}">{escape(str(value))}</div>{p}</div>'
+    st.markdown(h + "</div>", unsafe_allow_html=True)
+
+
+def pio_table(p: dict) -> pd.DataFrame:
+    return pd.DataFrame({
+        "signal": [x[0] for x in p["spec"]], "name": [x[1] for x in p["spec"]],
+        "points": pd.array([None if x[2] is None else int(bool(x[2])) for x in p["spec"]], dtype="Int64"),
+        "detail": [x[3] for x in p["spec"]]})
+
+
+def alt_table(c: dict) -> pd.DataFrame:
+    return pd.DataFrame({
+        "factor": FACTOR_NAMES, "peso": m["w"],
+        "ratio": [None if v is None else round(v, 4) for v in c["x"]],
+        "contribución": [None if v is None or not w else round(v, 4) for v, w in zip(c["contrib"], m["w"])]})
+
+
 zval = "—" if last["z"] is None else f"{last['z']:.2f}"
 fval = "—" if last_p["score"] is None else f"{last_p['score']}/9"
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("EMPRESA", company)
-c2.metric("ALTMAN Z", zval, last["zone"], delta_color=_dc)
-c3.metric("PIOTROSKI F", fval, last_p["zone"], delta_color=_dp)
-c4.metric("ACTIVO TOTAL", _fmt_num(latest.get("total_assets")))
-c5.metric("PATRIMONIO NETO", _fmt_num(latest.get("equity")))
-c6.metric("FY", str(latest["fy"]))
-if last_p["n"] < 9:
-    st.caption(f"Piotroski FY{latest['fy']}: {last_p['n']} de 9 criterios evaluables (falta el ejercicio anterior o algún dato). Mirá la pestaña PIOTROSKI.")
+cards([
+    ("COMPANY", company, "", "none"),
+    ("F-SCORE", fval, last_p["zone"] if last_p["score"] is not None else "", PK.get(last_p["zone"], "none")),
+    ("Z-SCORE", zval, last["zone"] if last["z"] is not None else "", ZK.get(last["zone"], "none")),
+    ("TOTAL ASSETS", _fmt_num(latest.get("total_assets")), "", "none"),
+    ("BOOK EQUITY", _fmt_num(latest.get("equity")), "", "none"),
+    ("FY", str(latest["fy"]), "", "none"),
+])
 
-tab_h, tab_c, tab_p, tab_g, tab_d, tab_f = st.tabs(["HISTORIAL", "ALTMAN", "PIOTROSKI", "CHARTS", "DATOS", "FORMULAS"])
+tab_o, tab_p, tab_c, tab_h, tab_f, tab_g, tab_d = st.tabs(
+    ["OVERVIEW", "PIOTROSKI", "ALTMAN", "HISTORIAL", "FORMULAS", "CHARTS", "DATOS"])
 
-with tab_h:
-    st.dataframe(hist, width="stretch", hide_index=True)
-    zs = [z for z in hist["Z-Score"] if z is not None and not pd.isna(z)]
-    if zs:
-        st.markdown(f"**Altman promedio:** `{sum(zs) / len(zs):.2f}` · Mín `{min(zs):.2f}` · Máx `{max(zs):.2f}`")
-    st.caption("Los ratios usan valores de una misma columna del balance, por lo que la reexpresión por inflación no los distorsiona.")
+with tab_o:
+    st.header("Piotroski F-Score")
+    st.dataframe(pio_table(last_p), width="stretch", hide_index=True)
+    st.markdown(f"**F-Score = {fval}** · {last_p['zone']} · criterios evaluados: {last_p['n']}/9")
+    if last_p["n"] < 9:
+        st.caption("Faltan criterios: cargá también el balance del ejercicio anterior o completá los campos en DATOS.")
+    st.header("Altman Z-Score")
+    st.dataframe(alt_table(last), width="stretch", hide_index=True)
+    st.markdown(f"Constante: `{m['const']}` · **Z = {'n/a' if last['z'] is None else format(last['z'], '.3f')}** · {last['zone']}")
+    if last["missing"]:
+        st.warning("Faltan datos para: " + ", ".join(last["missing"]))
+
+with tab_p:
+    yr2 = st.selectbox("Ejercicio", list(hist["FY"])[::-1], key="yr_pio")
+    p = pio[list(hist["FY"]).index(yr2)]
+    st.dataframe(pio_table(p), width="stretch", hide_index=True)
+    st.markdown(f"**F-Score = {p['score'] if p['score'] is not None else 'n/a'} / 9** · {p['zone']} · criterios evaluados: {p['n']}/9")
+    if p["n"] < 9:
+        st.warning("Hay criterios sin dato. Cargá el balance del ejercicio anterior o completá en DATOS: "
+                   "net_income, cfo, long_term_debt, cost_of_sales, share_capital.")
 
 with tab_c:
     yr = st.selectbox("Ejercicio", list(hist["FY"])[::-1], key="yr_altman")
     c = comp[list(hist["FY"]).index(yr)]
-    st.dataframe(pd.DataFrame({
-        "factor": FACTOR_NAMES, "peso": m["w"],
-        "ratio": [None if v is None else round(v, 4) for v in c["x"]],
-        "contribución": [None if v is None or not w else round(v, 4) for v, w in zip(c["contrib"], m["w"])],
-    }), width="stretch", hide_index=True)
+    st.dataframe(alt_table(c), width="stretch", hide_index=True)
     ztxt = "n/a" if c["z"] is None else format(c["z"], ".3f")
     st.markdown(f"Constante: `{m['const']}` · **Z = {ztxt}** · {c['zone']}")
     if c["missing"]:
@@ -503,18 +574,12 @@ with tab_c:
     if notes:
         st.caption("Notas de extracción: " + " | ".join(notes))
 
-with tab_p:
-    yr2 = st.selectbox("Ejercicio", list(hist["FY"])[::-1], key="yr_pio")
-    i2 = list(hist["FY"]).index(yr2)
-    p = pio[i2]
-    sym = {True: "✅ 1", False: "❌ 0", None: "— n/d"}
-    st.dataframe(pd.DataFrame({"criterio": PIO_NAMES, "resultado": [sym[t] for t in p["tests"]]}),
-                 width="stretch", hide_index=True)
-    st.markdown(f"**F-Score = {p['score'] if p['score'] is not None else 'n/a'} / 9** · {p['zone']} · "
-                f"criterios evaluados: {p['n']}/9")
-    if p["n"] < 9:
-        st.warning("Hay criterios sin dato. Cargá también el balance del ejercicio anterior (o completá los campos en DATOS: "
-                   "net_income, cfo, long_term_debt, cost_of_sales, share_capital).")
+with tab_h:
+    st.dataframe(hist, width="stretch", hide_index=True)
+    zs = [z for z in hist["Z-Score"] if z is not None and not pd.isna(z)]
+    if zs:
+        st.markdown(f"**Altman promedio:** `{sum(zs) / len(zs):.2f}` · Mín `{min(zs):.2f}` · Máx `{max(zs):.2f}`")
+    st.caption("Los ratios usan valores de una misma columna del balance, por lo que la reexpresión por inflación no los distorsiona.")
 
 with tab_g:
     st.subheader("Evolución de los indicadores")
@@ -601,6 +666,7 @@ with tab_f:
 7. Capital social nominal sin aumento · 8. Margen bruto ((Ventas − Costo)/Ventas) mayor · 9. Rotación (Ventas/Activo) mayor.
 Puntaje 8–9 fuerte, 4–7 medio, 0–3 débil. Para una no cotizante, el criterio 7 se mide con el capital social nominal.
 """)
+
 
 
 
