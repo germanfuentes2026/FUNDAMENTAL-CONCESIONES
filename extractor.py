@@ -1,5 +1,5 @@
 """Extractor de estados contables SIN IA (lectura local del PDF) + relleno opcional con IA barata.
-
+ 
 Flujo:
 1. pypdf extrae el texto de cada página (gratis, local).
 2. Se ubican las páginas del balance, estado de resultados y flujo de efectivo.
@@ -8,16 +8,16 @@ Flujo:
    (no el PDF) y se piden SOLO los campos faltantes, con un modelo chico y pocos tokens de salida.
 """
 from __future__ import annotations
-
+ 
 import io
 import json
 import os
 import re
 import unicodedata
 from datetime import date
-
+ 
 from pypdf import PdfReader
-
+ 
 FIELDS = [
     "current_assets", "current_liabilities", "total_assets", "total_liabilities",
     "equity", "retained_earnings", "ebit", "sales",
@@ -25,22 +25,22 @@ FIELDS = [
 ]
 AI_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-5-5")
 AI_MAX_CHARS = 30000
-
+ 
 MONTHS = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6, "julio": 7,
           "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12}
-
-
+ 
+ 
 # ───────────────────────── utilidades de texto/números ─────────────────────────
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c)).lower()
     return re.sub(r"[ \t\u00a0]+", " ", s)
-
-
+ 
+ 
 _TOK = re.compile(r"\(?-?\s?\d[\d.,]*\)?|(?<=\s)-(?=\s|$)")
 _NOTA = re.compile(r"\(?\bnotas?\b[^\d\n]{0,6}\d+(?:\s*(?:,|y|a|/)\s*\d+)*\)?", re.I)
-
-
+ 
+ 
 def _val(raw: str):
     raw = raw.strip()
     neg = raw.startswith("(") or raw.startswith("-")
@@ -56,8 +56,8 @@ def _val(raw: str):
     except ValueError:
         return None
     return -v if neg else v
-
-
+ 
+ 
 def _split(line: str):
     line = _NOTA.sub(" ", line)
     toks = list(_TOK.finditer(line))
@@ -74,8 +74,8 @@ def _split(line: str):
     if len(vals) == 1:
         return label, (vals[0], None)
     return label, (vals[0], vals[1])
-
-
+ 
+ 
 def _lines(text: str) -> list:
     raw = [l.strip() for l in text.splitlines() if l.strip()]
     out, i = [], 0
@@ -88,8 +88,8 @@ def _lines(text: str) -> list:
         out.append(_split(l))
         i += 1
     return out
-
-
+ 
+ 
 def _firstl(lines, pat, excl=None, start=0, end=None):
     rx = re.compile(pat)
     ex = re.compile(excl) if excl else None
@@ -97,20 +97,20 @@ def _firstl(lines, pat, excl=None, start=0, end=None):
         if c and rx.search(lab) and not (ex and ex.search(lab)):
             return lab, c
     return None, None
-
-
+ 
+ 
 def _first(lines, pat, excl=None):
     return _firstl(lines, pat, excl)[1]
-
-
+ 
+ 
 def _idx(lines, pat, need_nums=True):
     rx = re.compile(pat)
     for i, (lab, c) in enumerate(lines):
         if rx.search(lab) and (c or not need_nums):
             return i
     return None
-
-
+ 
+ 
 def _sumcols(items):
     if not items:
         return None
@@ -119,15 +119,15 @@ def _sumcols(items):
         vs = [c[k] for c in items if c[k] is not None]
         out.append(sum(vs) if vs else None)
     return tuple(out)
-
-
+ 
+ 
 def _op(a, b, fn):
     """Operación columna a columna; None si falta algún dato."""
     if a is None or b is None:
         return None
     return tuple(None if a[k] is None or b[k] is None else fn(a[k], b[k]) for k in (0, 1))
-
-
+ 
+ 
 # ───────────────────────── extracción local ─────────────────────────
 def _dates(norm_text: str):
     found = []
@@ -143,15 +143,15 @@ def _dates(norm_text: str):
         if x not in uniq:
             uniq.append(x)
     return uniq
-
-
+ 
+ 
 def _prev_year(d: date) -> date:
     try:
         return d.replace(year=d.year - 1)
     except ValueError:
         return d.replace(year=d.year - 1, day=28)
-
-
+ 
+ 
 def _company_name(texts) -> str | None:
     head = "\n".join(texts[:3])
     m = re.search(r"(?:denominaci[oó]n|raz[oó]n social)(?:\s+de\s+la\s+sociedad)?\s*:?\s*\n?\s*([^\n]{4,80})", head, re.I)
@@ -159,8 +159,8 @@ def _company_name(texts) -> str | None:
         return m.group(1).strip(" .:")
     m = re.search(r"\b([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ0-9 .,&'\-]{4,70}?\s(?:S\.?A\.?[A-Z.]*|S\.?R\.?L\.?))(?=\s|$)", head)
     return m.group(1).strip() if m else None
-
-
+ 
+ 
 def _parse(texts):
     n = [_norm(t) for t in texts]
     bal_i = [i for i, t in enumerate(n) if re.search(r"total (del )?(activo|pasivo|patrimonio neto)\b", t)][:3]
@@ -174,12 +174,12 @@ def _parse(texts):
              and re.search(r"antes (del|de) impuesto|resultado operativo|costo", t)][:2]
     cf_i = [i for i, t in enumerate(n)
             if "flujo de efectivo" in t and re.search(r"actividades (operativas|de operacion)", t)][:2]
-
+ 
     L_bal = [x for i in bal_i for x in _lines(texts[i])]
     L_res = [x for i in res_i for x in _lines(texts[i])]
     L_cf = [x for i in cf_i for x in _lines(texts[i])]
     notes: list[str] = []
-
+ 
     # unidad
     head = " ".join(n[i] for i in bal_i[:1] + res_i[:1])
     mult = 1.0
@@ -187,7 +187,7 @@ def _parse(texts):
         mult = 1e3
     elif re.search(r"en millones", head):
         mult = 1e6
-
+ 
     # fechas
     ds = _dates(head)
     if not ds:
@@ -195,7 +195,7 @@ def _parse(texts):
     cur_end = max(ds)
     prev = [d for d in ds if d.year == cur_end.year - 1]
     prior_end = max(prev) if prev else _prev_year(cur_end)
-
+ 
     V: dict[str, tuple | None] = {}
     V["total_assets"] = _first(L_bal, r"^total (del )?activo$")
     V["current_assets"] = _first(L_bal, r"^total (del )?activo corriente")
@@ -206,13 +206,13 @@ def _parse(texts):
         V["total_liabilities"] = _op(V["total_assets"], V["equity"], lambda a, e: a - e)
         if V["total_liabilities"]:
             notes.append("Pasivo total = activo − patrimonio neto.")
-
+ 
     V["sales"] = _first(L_res, r"^(ingresos?|ventas?)\b.*(servicios|peaje|operativ|ordinari|netas|concesi)|^ventas netas|^ingresos$|^ventas$",
                         r"costo|financier|otros")
     V["cost_of_sales"] = _first(L_res, r"^costos?\s+de\s+(los\s+|la\s+)?(servicios|ventas|explotacion|operacion|concesion)")
     V["net_income"] = (_first(L_res, r"^(resultado|ganancia|perdida)\s*(\(perdida\)\s*)?(neto|neta)?\s*(del\s+ejercicio|del\s+periodo)\b", r"antes|otro")
                        or _first(L_res, r"^(ganancia|perdida|resultado)\s*(\(perdida\)\s*)?(neta?)?\s*$"))
-
+ 
     ebit = _first(L_res, r"^(resultado|ganancia|utilidad|perdida)\b.*\b(operativ[oa]|de explotacion)\b", r"antes|actividades")
     if ebit is None:
         ebt = _first(L_res, r"^(resultado|ganancia|perdida)\b.*antes (del|de)\s+impuesto")
@@ -224,9 +224,9 @@ def _parse(texts):
                 ebit = _op(ebit, rec, lambda a, b: a - b)
             notes.append("EBIT estimado = resultado antes de impuesto − resultados financieros (verificar).")
     V["ebit"] = ebit
-
+ 
     V["cfo"] = _first(L_cf, r"(flujo|efectivo).*(generado|proveniente|utilizado|usado|neto).*actividades\s+(operativas|de\s+operacion)")
-
+ 
     # capital y resultados acumulados (sección patrimonio del balance)
     i_cap = _idx(L_bal, r"^capital\b(?!.*ajuste)")
     i_eq = _idx(L_bal, r"^total (del )?patrimonio neto")
@@ -241,7 +241,7 @@ def _parse(texts):
         V["retained_earnings"] = _sumcols(items)
         if items:
             notes.append("Resultados acumulados = reservas + resultados no asignados (verificar).")
-
+ 
     # deuda financiera no corriente
     i_nc = _idx(L_bal, r"^pasivo no corriente$", need_nums=False)
     i_tnc = _idx(L_bal, r"^total (del )?pasivo no corriente")
@@ -251,19 +251,19 @@ def _parse(texts):
                  if c and not lab.startswith("total")
                  and re.search(r"prestamos|obligaciones negociables|deudas? financieras|financiaciones", lab)]
         V["long_term_debt"] = _sumcols(items) or (0.0, 0.0)
-
+ 
     recs = []
     for k, (end, col) in enumerate(((cur_end, "current"), (prior_end, "prior"))):
         rec = {f: (None if V.get(f) is None or V[f][k] is None else V[f][k] * mult) for f in FIELDS}
         recs.append({"period_end": end.isoformat(), "column": col, **rec})
     pages = sorted(set(bal_i + res_i + cf_i))
     return recs, pages, mult, notes, _company_name(texts)
-
-
+ 
+ 
 # ───────────────────────── IA opcional (solo faltantes) ─────────────────────────
 def _ai_fill(text: str, miss_cur: list, miss_prior: list, key: str, model: str) -> dict:
     import anthropic
-
+ 
     prompt = (
         "Del texto de estados contables argentinos (concesionaria vial) extraé SOLO estos campos. "
         f"Ejercicio actual: {miss_cur}. Ejercicio anterior (columna comparativa): {miss_prior}.\n"
@@ -278,8 +278,57 @@ def _ai_fill(text: str, miss_cur: list, miss_prior: list, key: str, model: str) 
     out = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     a, b = out.find("{"), out.rfind("}")
     return json.loads(out[a:b + 1]) if a >= 0 and b >= 0 else {}
-
-
+ 
+ 
+ 
+_PDF_PROMPT = """Sos un analista contable argentino. Del PDF (estados contables de una concesionaria vial, escaneado) extraé los datos
+y devolvé SOLO un JSON: {"company": "razón social", "periods": [{"period_end": "YYYY-MM-DD", "column": "current" | "prior",
+"current_assets": n, "current_liabilities": n, "total_assets": n, "total_liabilities": n, "equity": n, "retained_earnings": n,
+"ebit": n, "sales": n, "net_income": n, "cfo": n, "long_term_debt": n, "cost_of_sales": n, "share_capital": n}]}
+Una entrada por columna del balance (actual y comparativo). Números en unidades completas (si dice "en miles", multiplicá por 1000). Pérdidas negativas.
+retained_earnings = reservas + resultados no asignados. ebit = resultado operativo antes de resultados financieros e impuestos.
+sales = ingresos por peajes/concesión. cfo = flujo de actividades operativas. long_term_debt = deudas financieras no corrientes.
+cost_of_sales en positivo. share_capital nominal sin ajuste. null si no figura; no inventes."""
+ 
+ 
+def _scanned_with_ai(pdf_bytes, source, company, npages, key, model, cache):
+    import base64
+ 
+    import anthropic
+ 
+    if npages > 100:
+        raise ValueError(f"El PDF tiene {npages} páginas; la API admite hasta 100. Recortalo a las páginas del balance.")
+    if len(pdf_bytes) > 24 * 1024 * 1024:
+        raise ValueError("El PDF pesa más de 24 MB; recortalo a las páginas del balance.")
+    cache = cache if cache is not None else {}
+    ck = ("pdf", hash(pdf_bytes))
+    if ck not in cache:
+        msg = anthropic.Anthropic(api_key=key).messages.create(
+            model=model, max_tokens=3000,
+            messages=[{"role": "user", "content": [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                                "data": base64.standard_b64encode(pdf_bytes).decode()}},
+                {"type": "text", "text": _PDF_PROMPT}]}])
+        out = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        a, b = out.find("{"), out.rfind("}")
+        if a < 0 or b < 0:
+            raise ValueError("La IA no devolvió un JSON válido.")
+        cache[ck] = json.loads(out[a:b + 1])
+    res = cache[ck]
+    recs = []
+    for p in res.get("periods", []):
+        end = str(p.get("period_end") or "")[:10]
+        if not re.match(r"\d{4}-\d{2}-\d{2}$", end):
+            continue
+        recs.append({"company": company or res.get("company") or "Sin nombre", "fy": int(end[:4]), "period_end": end,
+                     "origin": "own" if p.get("column") == "current" else "comparative", "source": source,
+                     **{f: p.get(f) for f in FIELDS}, "notes": "Leído con IA desde PDF escaneado (verificar)."})
+    if not recs:
+        raise ValueError("La IA no encontró ejercicios con fecha válida en el PDF.")
+    base = next((r for r in recs if r["origin"] == "own"), recs[0])
+    return recs, {"missing": [f for f in FIELDS if base[f] is None], "ai": ["PDF escaneado completo"]}
+ 
+ 
 # ───────────────────────── API pública ─────────────────────────
 def extract_pdf(pdf_bytes: bytes, source: str, company: str | None = None, use_ai: bool = False,
                 api_key: str = "", ai_model: str = AI_MODEL, cache: dict | None = None):
@@ -291,12 +340,23 @@ def extract_pdf(pdf_bytes: bytes, source: str, company: str | None = None, use_a
             texts.append(p.extract_text() or "")
         except Exception:  # noqa: BLE001
             texts.append("")
-    if sum(len(t.strip()) for t in texts) < 300:
-        raise ValueError("El PDF no tiene texto seleccionable (parece escaneado). Cargá los datos a mano en DATOS.")
-
-    periods, pages, mult, notes, detected = _parse(texts)
+    con_texto = sum(1 for t in texts if len(t.strip()) > 50)
+    periods, err = None, None
+    if con_texto:
+        try:
+            periods, pages, mult, notes, detected = _parse(texts)
+        except ValueError as exc:
+            err = exc
+    if periods is None:
+        if use_ai and api_key:
+            return _scanned_with_ai(pdf_bytes, source, company, len(texts), api_key, ai_model, cache)
+        if con_texto <= max(2, len(texts) // 10):
+            raise ValueError(
+                f"Parece un PDF escaneado ({con_texto} de {len(texts)} páginas con texto), no se puede leer localmente. "
+                "Opciones: cargar los datos en 'Carga manual' (barra lateral) o activar la IA y configurar ANTHROPIC_API_KEY.")
+        raise err or ValueError("No pude leer el balance.")
     ai_done: list[str] = []
-
+ 
     if use_ai and api_key:
         miss = [[f for f in FIELDS if p[f] is None] for p in periods]
         if any(miss):
@@ -323,7 +383,7 @@ def extract_pdf(pdf_bytes: bytes, source: str, company: str | None = None, use_a
                             ai_done.append(f)
             if ai_done:
                 notes.append("Completado con IA: " + ", ".join(ai_done) + ".")
-
+ 
     name = company or detected or "Sin nombre"
     recs = []
     for p in periods:
@@ -338,4 +398,4 @@ def extract_pdf(pdf_bytes: bytes, source: str, company: str | None = None, use_a
         raise ValueError("No pude leer valores del balance. Cargalos a mano en DATOS o activá la IA.")
     missing = [f for f in FIELDS if periods[0][f] is None]
     return recs, {"missing": missing, "ai": ai_done}
-
+ 
