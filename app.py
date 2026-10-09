@@ -1,12 +1,12 @@
 """Fundamental Terminal — Altman Z-Score + Piotroski F-Score para concesionarias viales que NO cotizan.
-
+ 
 Subís los balances en PDF, Claude los lee (la API key se configura UNA vez en el servidor, no aparece en la pantalla),
 la app acumula los ejercicios y calcula el historial de Altman y Piotroski.
 Requiere: streamlit, pandas, altair, pypdf, anthropic
 API key: variable de entorno ANTHROPIC_API_KEY o .streamlit/secrets.toml  ->  ANTHROPIC_API_KEY = "sk-ant-..."
 """
 from __future__ import annotations
-
+ 
 import base64
 import io
 import json
@@ -14,14 +14,14 @@ import math
 import os
 import re
 from pathlib import Path
-
+ 
 import altair as alt
 import pandas as pd
 import streamlit as st
 from html import escape
-
+ 
 # ═════════════════════════ 1. MODELOS ═════════════════════════
-
+ 
 FIELDS = [
     "current_assets", "current_liabilities", "total_assets", "total_liabilities",
     "equity", "retained_earnings", "ebit", "sales",
@@ -51,20 +51,20 @@ PIO_NAMES = [
     "8 Margen bruto sube",
     "9 Rotación del activo sube",
 ]
-
-
+ 
+ 
 def _num(v):
     try:
         f = float(v)
     except (TypeError, ValueError):
         return None
     return None if math.isnan(f) else f
-
-
+ 
+ 
 def _div(a, b):
     return None if a is None or b is None or b == 0 else a / b
-
-
+ 
+ 
 def compute(rec: dict, model: str) -> dict:
     m = MODELS[model]
     g = {k: _num(rec.get(k)) for k in FIELDS}
@@ -86,30 +86,30 @@ def compute(rec: dict, model: str) -> dict:
     else:
         zone = "GREY"
     return {"x": x, "contrib": contrib, "const": m["const"], "z": z, "zone": zone, "missing": missing}
-
-
+ 
+ 
 def piotroski(cur: dict, prev: dict | None) -> dict:
     """F-Score de 9 criterios. Compara RATIOS de cada año (la inflación no los distorsiona).
     Sin año anterior cargado, los criterios de variación quedan n/d."""
     def g(r, k):
         return _num(r.get(k)) if r else None
-
+ 
     roa = lambda r: _div(g(r, "net_income"), g(r, "total_assets"))
     lev = lambda r: _div(g(r, "long_term_debt"), g(r, "total_assets"))
     cr = lambda r: _div(g(r, "current_assets"), g(r, "current_liabilities"))
     at = lambda r: _div(g(r, "sales"), g(r, "total_assets"))
-
+ 
     def gm(r):
         s_, c_ = g(r, "sales"), g(r, "cost_of_sales")
         return None if s_ in (None, 0) or c_ is None else (s_ - abs(c_)) / s_
-
+ 
     def dlt(f):
         x, y = f(cur), f(prev) if prev else None
         return None if x is None or y is None else x - y
-
+ 
     pct = lambda v: "n/d" if v is None else f"{v * 100:.2f}%"
     num = lambda v: "n/d" if v is None else f"{v:.2f}"
-
+ 
     def big(v):
         if v is None:
             return "n/d"
@@ -117,7 +117,7 @@ def piotroski(cur: dict, prev: dict | None) -> dict:
             if abs(v) >= lim:
                 return f"{v / lim:,.2f}{suf}"
         return f"{v:,.0f}"
-
+ 
     ni, cfo = g(cur, "net_income"), g(cur, "cfo")
     d_roa, d_lev, d_cr, d_gm, d_at = dlt(roa), dlt(lev), dlt(cr), dlt(gm), dlt(at)
     sc_c, sc_p = g(cur, "share_capital"), (g(prev, "share_capital") if prev else None)
@@ -151,29 +151,29 @@ def piotroski(cur: dict, prev: dict | None) -> dict:
     else:
         zone = "LOW QUALITY"
     return {"tests": tests, "spec": spec, "score": None if n == 0 else score, "n": n, "zone": zone}
-
-
+ 
+ 
 # ═════════════════════════ 2. ALMACENAMIENTO ═════════════════════════
-
+ 
 STORE = Path(__file__).resolve().parent / "data" / "balances.json"
 _PRIORITY = {"own": 1, "comparative": 0, "manual": 2}
-
-
+ 
+ 
 def load() -> list[dict]:
     try:
         return json.loads(STORE.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return []
-
-
+ 
+ 
 def save(records: list[dict]) -> None:
     try:
         STORE.parent.mkdir(parents=True, exist_ok=True)
         STORE.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError:
         pass  # filesystem de solo lectura (p. ej. hosting): queda en sesión
-
-
+ 
+ 
 def merge(records: list[dict], new: list[dict]) -> list[dict]:
     """Un registro por (empresa, FY). Prioridad: manual > balance propio > comparativo.
     Si el registro ganador no tiene un campo y el otro sí, se completa."""
@@ -190,20 +190,20 @@ def merge(records: list[dict], new: list[dict]) -> list[dict]:
                 if old.get(f) is None and r.get(f) is not None:
                     old[f] = r[f]
     return sorted(out.values(), key=lambda r: (r["company"].lower(), int(r["fy"])))
-
-
+ 
+ 
 # ═════════════════════════ 3. EXTRACCIÓN DESDE PDF ═════════════════════════
-
+ 
 MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 MAX_PAGES = 140
 MAX_UPLOAD_MB = 22
 KEYWORDS = re.compile(
     r"estado de situaci[oó]n|balance general|estado de resultados|estado del resultado|"
     r"evoluci[oó]n del patrimonio|flujo de efectivo|total del activo|total activo", re.I)
-
+ 
 PROMPT = """Sos un analista contable argentino. Del PDF adjunto (estados contables de una concesionaria vial)
 extraé los datos para calcular el Altman Z-Score y el Piotroski F-Score. Devolvé SOLO un JSON, sin texto ni markdown, con esta forma:
-
+ 
 {"company": "razón social",
  "periods": [
   {"period_end": "YYYY-MM-DD", "column": "current" | "prior",
@@ -212,7 +212,7 @@ extraé los datos para calcular el Altman Z-Score y el Piotroski F-Score. Devolv
    "net_income": n, "cfo": n, "long_term_debt": n, "cost_of_sales": n, "share_capital": n,
    "notes": "texto breve"}
  ]}
-
+ 
 Reglas:
 - Una entrada por cada columna del estado de situación patrimonial: el ejercicio actual ("current") y el comparativo ("prior").
 - Números en unidades completas (si el estado dice "en millones", multiplicá por 1.000.000). Pérdidas con signo negativo.
@@ -226,11 +226,11 @@ Reglas:
 - cost_of_sales = costo de los servicios prestados / costo de explotación del ejercicio (en positivo).
 - share_capital = capital social nominal (sin ajuste de capital).
 - Si un dato no figura, usá null. No inventes valores."""
-
-
+ 
+ 
 def select_pages(pdf_bytes: bytes) -> bytes:
     from pypdf import PdfReader, PdfWriter
-
+ 
     reader = PdfReader(io.BytesIO(pdf_bytes))
     n = len(reader.pages)
     if n <= MAX_PAGES:
@@ -249,16 +249,16 @@ def select_pages(pdf_bytes: bytes) -> bytes:
     buf = io.BytesIO()
     w.write(buf)
     return buf.getvalue()
-
-
+ 
+ 
 def parse_json(text: str) -> dict:
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
     a, b = text.find("{"), text.rfind("}")
     if a < 0 or b < 0:
         raise ValueError("La respuesta no contiene un JSON.")
     return json.loads(text[a:b + 1])
-
-
+ 
+ 
 def normalize(result: dict, source: str, company: str | None = None) -> list[dict]:
     recs = []
     for p in result.get("periods", []):
@@ -274,11 +274,11 @@ def normalize(result: dict, source: str, company: str | None = None) -> list[dic
             "notes": p.get("notes") or "",
         })
     return recs
-
-
+ 
+ 
 def extract(pdf_bytes: bytes, api_key: str, source: str, company: str | None = None, model: str = MODEL) -> list[dict]:
     """Envía el PDF a Claude y devuelve registros normalizados.
-
+ 
     La API de Anthropic admite PDFs como bloques de documento codificados en base64.
     Se valida tamaño y se devuelven errores legibles para Streamlit.
     """
@@ -287,24 +287,24 @@ def extract(pdf_bytes: bytes, api_key: str, source: str, company: str | None = N
             "No está configurada ANTHROPIC_API_KEY. Configurala en "
             "Streamlit Cloud → Settings → Secrets."
         )
-
+ 
     size_mb = len(pdf_bytes) / (1024 * 1024)
     if size_mb > MAX_UPLOAD_MB:
         raise ValueError(
             f"El PDF pesa {size_mb:.1f} MB. El límite recomendado de esta app es "
             f"{MAX_UPLOAD_MB} MB para enviarlo a Claude."
         )
-
+ 
     try:
         import anthropic
     except ImportError as exc:
         raise RuntimeError(
             "Falta instalar el paquete anthropic. Agregá 'anthropic>=0.75.0' a requirements.txt."
         ) from exc
-
+ 
     selected_pdf = select_pages(pdf_bytes)
     data = base64.standard_b64encode(selected_pdf).decode("utf-8")
-
+ 
     client = anthropic.Anthropic(api_key=api_key)
     try:
         msg = client.messages.create(
@@ -343,13 +343,13 @@ def extract(pdf_bytes: bytes, api_key: str, source: str, company: str | None = N
                 "El PDF excede el tamaño máximo aceptado por la API. Probá con un PDF más liviano."
             ) from exc
         raise RuntimeError(f"Error de Anthropic al analizar '{source}': {msg_text}") from exc
-
+ 
     text = "".join(
         b.text for b in msg.content if getattr(b, "type", "") == "text"
     )
     if not text.strip():
         raise RuntimeError("Claude respondió sin contenido de texto.")
-
+ 
     try:
         result = parse_json(text)
     except Exception as exc:
@@ -357,7 +357,7 @@ def extract(pdf_bytes: bytes, api_key: str, source: str, company: str | None = N
         raise RuntimeError(
             "Claude no devolvió un JSON válido. Respuesta parcial: " + preview
         ) from exc
-
+ 
     recs = normalize(result, source, company)
     if not recs:
         raise RuntimeError(
@@ -365,293 +365,327 @@ def extract(pdf_bytes: bytes, api_key: str, source: str, company: str | None = N
             "Revisá que el archivo contenga estados contables legibles."
         )
     return recs
-
-
+ 
+ 
 # ═════════════════════════ 4. APP STREAMLIT ═════════════════════════
 def _secret(name: str) -> str:
     try:
         return str(st.secrets.get(name, "") or "")
     except Exception:  # noqa: BLE001
         return ""
-
-
+ 
+ 
 API_KEY = os.getenv("ANTHROPIC_API_KEY", "") or _secret("ANTHROPIC_API_KEY")  # nunca se muestra en pantalla
-
-
+ 
+ 
 def api_status() -> tuple[bool, str]:
     if API_KEY:
         return True, "ANTHROPIC_API_KEY configurada"
     return False, "Falta ANTHROPIC_API_KEY"
-
-
+ 
+ 
 API_OK, API_STATUS = api_status()
-
+ 
 st.set_page_config(page_title="Fundamental Terminal", page_icon="▣", layout="wide")
-
+ 
 BLOOMBERG_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
-
+ 
 :root {
-  --bg: #07090b;
-  --panel: #0d1110;
-  --panel2: #111714;
-  --line: #263229;
-  --muted: #7e8c81;
+  --bg: #0b0e11;
+  --bg-deep: #07090b;
+  --panel: #0f1411;
+  --panel2: #121815;
+  --line: #243026;
+  --line-soft: #1c261f;
+  --muted: #7f8c82;
   --text: #e8f0e9;
   --amber: #f5a623;
   --amber2: #ffbf45;
+  --tab-hi: #f2672f;
   --green: #3ddc84;
   --red: #ff6262;
 }
-
-html, body, [class*="css"] {
+ 
+html, body, [class*="css"], .stMarkdown, .stCaption, label, input, button {
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
-
+ 
+/* ───── Fondo general ───── */
 .stApp {
-  background:
-    radial-gradient(900px 480px at 10% -8%, #18221d 0%, #0b0e11 48%, #07090b 100%);
+  background: radial-gradient(1000px 520px at 12% -10%, #17211b 0%, #0b0e11 50%, #07090b 100%);
   color: var(--text);
 }
-
+ 
 header[data-testid="stHeader"] {
   background: #090c0e;
-  border-bottom: 1px solid #1c251f;
+  border-bottom: 1px solid var(--line-soft);
 }
-
+ 
+.block-container {
+  padding-top: 4.4rem;
+  padding-bottom: 3rem;
+  max-width: 1480px;
+}
+ 
+h1, h2, h3, h4 {
+  font-family: "IBM Plex Sans", sans-serif;
+  letter-spacing: .01em;
+}
+ 
+h2 {
+  color: #d9e2db;
+  font-weight: 600;
+  font-size: 1.9rem;
+}
+ 
+/* ───── Sidebar ───── */
 section[data-testid="stSidebar"] {
   background: #080b0d;
-  border-right: 1px solid #1d2620;
+  border-right: 1px solid var(--line-soft);
 }
-
+ 
 section[data-testid="stSidebar"] * {
   color: #cbd4cc;
 }
-
+ 
+section[data-testid="stSidebar"] label p {
+  font-size: 13px;
+  color: #c3ccc4;
+}
+ 
 section[data-testid="stSidebar"] input,
 section[data-testid="stSidebar"] [data-baseweb="select"] > div,
 section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
   background: #0f1317 !important;
-  border: 1px solid #202a24 !important;
+  border: 1px solid #1e2822 !important;
   border-radius: 8px !important;
+  font-family: "IBM Plex Mono", monospace;
 }
-
+ 
 section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
   min-height: 90px;
 }
-
-.block-container {
-  padding-top: 4.2rem;
-  padding-bottom: 3rem;
-  max-width: 1480px;
+ 
+section[data-testid="stSidebar"] hr {
+  border-color: var(--line-soft);
+  margin: 1.2rem 0;
 }
-
-h1, h2, h3 {
-  font-family: "IBM Plex Sans", sans-serif;
-  letter-spacing: .015em;
+ 
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {
+  color: #7f8c82;
+  line-height: 1.55;
 }
-
-h2 {
-  color: #d9e2db;
-  font-weight: 600;
-}
-
+ 
+/* ───── Masthead ───── */
 .ft-masthead {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  border: 1px solid #263229;
-  background: linear-gradient(90deg, #101612 0%, #0d1210 58%, #17140b 100%);
-  padding: 15px 18px 14px;
+  align-items: flex-start;
+  border: 1px solid var(--line);
+  background: linear-gradient(90deg, #101612 0%, #0d1210 55%, #1a1508 100%);
+  padding: 16px 20px 15px;
   margin-bottom: 14px;
-  min-height: 118px;
+  min-height: 140px;
 }
-
+ 
 .ft-brand {
   font-family: "IBM Plex Mono", monospace;
   color: var(--amber);
   font-weight: 600;
   font-size: 12px;
-  letter-spacing: .30em;
+  letter-spacing: .34em;
   text-transform: uppercase;
 }
-
+ 
 .ft-title {
-  font-size: 27px;
+  font-size: 28px;
   font-weight: 700;
-  color: #eef5ef;
-  line-height: 1.08;
-  margin-top: 4px;
+  color: #f0f6f1;
+  line-height: 1.1;
+  margin-top: 6px;
 }
-
+ 
 .ft-sub {
-  color: #819084;
+  color: #7f8e83;
   font-size: 12px;
-  margin-top: 5px;
+  margin-top: 6px;
 }
-
+ 
 .ft-clock {
   text-align: right;
   font-family: "IBM Plex Mono", monospace;
-  color: #9aa79c;
+  color: #98a59a;
   font-size: 11px;
-  line-height: 1.65;
+  line-height: 1.7;
+  align-self: flex-end;
 }
-
+ 
 .ft-ticker {
   color: var(--amber);
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 20px;
-  font-weight: 600;
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 21px;
+  font-weight: 700;
 }
-
+ 
 .ft-company {
   color: #9ca89f;
   font-weight: 600;
-  font-size: 14px;
-  margin-left: 7px;
+  font-size: 13px;
+  margin-left: 9px;
 }
-
+ 
+/* ───── Tarjetas KPI ───── */
 .ft-cards {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: 10px;
   margin: 4px 0 22px;
 }
-
+ 
 .ft-card {
-  background: rgba(17,23,20,.94);
-  border: 1px solid #263229;
-  min-height: 105px;
-  padding: 13px 8px 12px;
+  background: rgba(15, 21, 17, .96);
+  border: 1px solid var(--line);
+  min-height: 112px;
+  padding: 14px 8px 13px;
   text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 8px;
 }
-
+ 
 .ft-clabel {
   font-family: "IBM Plex Mono", monospace;
-  color: #89978c;
-  letter-spacing: .12em;
-  font-size: 10px;
+  color: #8a988d;
+  letter-spacing: .13em;
+  font-size: 10.5px;
   text-transform: uppercase;
+  line-height: 1.35;
 }
-
+ 
 .ft-cvalue {
   font-family: "IBM Plex Mono", monospace;
   color: #eef4ef;
-  font-size: 1.78rem;
-  line-height: 1.12;
+  font-size: 1.85rem;
+  line-height: 1.1;
+  font-weight: 500;
 }
-
+ 
 .ft-cvalue.sm {
-  font-size: 1.02rem;
+  font-size: 1.05rem;
   word-break: break-word;
 }
-
+ 
 .ft-pill {
   font-size: 11px;
   font-weight: 600;
   border-radius: 999px;
-  padding: 2px 10px;
-  letter-spacing: .025em;
+  padding: 2px 11px;
+  letter-spacing: .03em;
 }
-
-.ft-pill.good {
-  background: rgba(61,220,132,.16);
-  color: var(--green);
-}
-
-.ft-pill.mid {
-  background: rgba(245,166,35,.16);
-  color: var(--amber2);
-}
-
-.ft-pill.bad {
-  background: rgba(255,98,98,.15);
-  color: var(--red);
-}
-
+ 
+.ft-pill.good { background: rgba(61,220,132,.16); color: var(--green); }
+.ft-pill.mid  { background: rgba(245,166,35,.16); color: var(--amber2); }
+.ft-pill.bad  { background: rgba(255,98,98,.15);  color: var(--red); }
+ 
+/* ───── Tabs ───── */
 .stTabs [data-baseweb="tab-list"] {
   gap: 22px;
   background: transparent;
-  border-bottom: 1px solid #263229;
+  border-bottom: 1px solid var(--line);
 }
-
+ 
 .stTabs [data-baseweb="tab"] {
   background: transparent;
   color: #e5ece6;
   font-family: "IBM Plex Sans", sans-serif;
   font-weight: 500;
   font-size: 13px;
+  letter-spacing: .01em;
   padding: 0 0 11px;
 }
-
+ 
 .stTabs [aria-selected="true"] {
   color: var(--amber) !important;
 }
-
+ 
 .stTabs [data-baseweb="tab-highlight"] {
-  background-color: var(--amber) !important;
+  background-color: var(--tab-hi) !important;
   height: 2px;
 }
-
+ 
+.stTabs [data-baseweb="tab-border"] {
+  background-color: var(--line) !important;
+}
+ 
+/* ───── Tablas / métricas ───── */
 div[data-testid="stDataFrame"] {
-  border: 1px solid #263229;
+  border: 1px solid var(--line);
+  background: #0d1210;
 }
-
+ 
 [data-testid="stMetric"] {
-  background: #111714;
-  border: 1px solid #263229;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  padding: 10px 12px;
 }
-
-.stButton > button {
-  background: var(--amber);
-  color: #111;
-  border: 0;
-  border-radius: 6px;
-  font-weight: 700;
-  letter-spacing: .07em;
-  text-transform: uppercase;
-  font-family: "IBM Plex Mono", monospace;
-}
-
-.stButton > button:hover {
-  background: var(--amber2);
-  color: #111;
-}
-
+ 
+/* ───── Botones ───── */
+.stButton > button,
 .stDownloadButton > button {
   border-radius: 6px;
+  font-family: "IBM Plex Mono", monospace;
 }
-
-hr {
-  border-color: #263229;
+ 
+.stButton > button {
+  background: var(--amber);
+  color: #fff6e0;
+  border: 0;
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  font-size: 13px;
+  min-height: 2.7rem;
 }
-
-section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {
-  color: #7f8c82;
+ 
+.stButton > button:hover {
+  background: var(--amber2);
+  color: #fff;
 }
-
+ 
+.stDownloadButton > button {
+  background: #0f1317;
+  border: 1px solid #263229;
+  color: #cbd4cc;
+}
+ 
+hr { border-color: var(--line); }
+ 
+/* ───── Alertas más sobrias ───── */
+div[data-testid="stAlert"] {
+  background: #0f1511;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+ 
 @media (max-width: 1100px) {
   .ft-cards { grid-template-columns: repeat(3, 1fr); }
 }
-
+ 
 @media (max-width: 700px) {
   .ft-masthead { flex-direction: column; align-items: flex-start; gap: 14px; }
-  .ft-clock { text-align: left; }
+  .ft-clock { text-align: left; align-self: flex-start; }
   .ft-cards { grid-template-columns: repeat(2, 1fr); }
 }
 </style>
 """
-
+ 
 st.markdown(BLOOMBERG_CSS, unsafe_allow_html=True)
-
-
+ 
+ 
 def _fmt_num(v) -> str:
     if v is None or pd.isna(v):
         return "—"
@@ -659,21 +693,21 @@ def _fmt_num(v) -> str:
         if abs(v) >= lim:
             return f"{v / lim:,.2f}{suf}"
     return f"{v:,.0f}"
-
-
+ 
+ 
 def render_masthead(company: str | None, model: str, stmt: str = "") -> None:
     if company:
         identity = (
-            f'<div style="margin-top:8px">'
+            f'<div style="margin-top:12px">'
             f'<span class="ft-ticker">{escape(company)}</span>'
             f'<span class="ft-company">Concesionaria vial · no cotiza</span>'
             f'</div>'
         )
     else:
         identity = ""
-
+ 
     stmt_html = f"<br/>{escape(stmt)}" if stmt else ""
-
+ 
     st.markdown(
         f"""
         <div class="ft-masthead">
@@ -693,42 +727,42 @@ def render_masthead(company: str | None, model: str, stmt: str = "") -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
+ 
+ 
 def _style_chart(ch):
     return (ch.configure(background="#0b0e11").configure_view(stroke="#243328")
             .configure_axis(labelColor="#8b9a8d", titleColor="#8b9a8d", gridColor="#1f2a22", domainColor="#243328",
                             tickColor="#243328", labelFont="IBM Plex Mono", titleFont="IBM Plex Mono")
             .configure_legend(labelColor="#8b9a8d", titleColor="#8b9a8d")
             .configure_title(color="#e8f3e9", font="IBM Plex Mono", fontSize=14))
-
-
+ 
+ 
 def _threshold_layer(levels):
     df = pd.DataFrame(levels, columns=["y", "label", "color"])
     rules = alt.Chart(df).mark_rule(strokeDash=[5, 4], opacity=0.8).encode(y="y:Q", color=alt.Color("color:N", scale=None))
     texts = alt.Chart(df).mark_text(align="left", dx=4, dy=-6, fontSize=10).encode(
         y="y:Q", text="label:N", color=alt.Color("color:N", scale=None), x=alt.value(4))
     return rules + texts
-
-
+ 
+ 
 if "records" not in st.session_state:
     st.session_state.records = load()
 records: list[dict] = st.session_state.records
-
-
+ 
+ 
 def commit(new_records: list[dict]) -> None:
     st.session_state.records = merge(st.session_state.records, new_records)
     save(st.session_state.records)
-
-
+ 
+ 
 # ───────────────────────── SIDEBAR ─────────────────────────
 if "next_pick" in st.session_state:
     st.session_state["pick_company"] = st.session_state.pop("next_pick")
-
+ 
 with st.sidebar:
     st.markdown(
-        '<div style="font-family:IBM Plex Mono,monospace;letter-spacing:.12em;'
-        'color:#e7eee8;font-size:13px;font-weight:600">COMMAND</div>',
+        '<div style="font-family:IBM Plex Sans,sans-serif;letter-spacing:.04em;'
+        'color:#e7eee8;font-size:14px;font-weight:700">COMMAND</div>',
         unsafe_allow_html=True,
     )
     st.markdown('<div style="height:10px"></div>', unsafe_allow_html=True)
@@ -740,8 +774,8 @@ with st.sidebar:
     go = st.button("ANALIZAR BALANCE", width="stretch", type="primary")
     st.markdown("---")
     st.markdown(
-        '<div style="font-family:IBM Plex Mono,monospace;letter-spacing:.10em;'
-        'color:#e7eee8;font-size:12px;font-weight:600">MODEL</div>',
+        '<div style="font-family:IBM Plex Sans,sans-serif;letter-spacing:.04em;'
+        'color:#e7eee8;font-size:14px;font-weight:700">MODEL</div>',
         unsafe_allow_html=True,
     )
     model = st.selectbox("Modelo Altman", list(MODELS), index=1,
@@ -764,7 +798,7 @@ with st.sidebar:
     if up is not None and st.button("Restaurar", width="stretch"):
         commit(json.load(up))
         st.rerun()
-
+ 
 if go:
     flash = []
     if not files:
@@ -794,19 +828,20 @@ if go:
             st.session_state["next_pick"] = last_company
     st.session_state["flash"] = flash
     st.rerun()
-
+ 
 for _kind, _msg in st.session_state.pop("flash", []):
     getattr(st.sidebar, _kind)(_msg)
-
+ 
 with st.sidebar:
     st.markdown("---")
-    st.markdown("**ABOUT THE MODELS**")
+    st.markdown('<div style="font-family:IBM Plex Sans,sans-serif;font-weight:700;font-size:14px;'
+                'letter-spacing:.02em;color:#e7eee8">ABOUT THE MODELS</div>', unsafe_allow_html=True)
     st.caption("Altman Z'' (1995): Z = 6,56 X1 + 3,26 X2 + 6,72 X3 + 1,05 X4. Cortes 1,10 / 2,60 (EM: +3,25 y 4,15 / 5,85). "
                "X4 usa patrimonio contable porque la empresa no cotiza.")
     st.caption("Piotroski F-Score: 9 criterios binarios (rentabilidad, apalancamiento/liquidez, eficiencia). "
                "8–9 high quality · 4–7 medium · 0–3 low quality. Necesita el ejercicio anterior cargado para los criterios de variación.")
     st.caption("No son calificaciones crediticias. Verificá los datos extraídos en la pestaña DATOS.")
-
+ 
 # ───────────────────────── MAIN ─────────────────────────
 mine = [r for r in records if company and r["company"].lower() == company.lower()]
 if not mine:
@@ -824,7 +859,7 @@ if not mine:
     else:
         st.info("Subí uno o más balances en PDF de la concesionaria y luego tocá **ANALIZAR BALANCE**.")
     st.stop()
-
+ 
 mine = sorted(mine, key=lambda r: r["fy"])
 by_fy = {int(r["fy"]): r for r in mine}
 rows, comp, pio = [], [], []
@@ -843,12 +878,12 @@ last, last_p = comp[-1], pio[-1]
 m = MODELS[model]
 latest = mine[-1]
 render_masthead(company, model, f"Financials: FY{latest['fy']} · period end {latest['period_end']}")
-
+ 
 ZK = {"SAFE": "good", "GREY": "mid", "DISTRESS": "bad"}
 PK = {"HIGH QUALITY": "good", "MEDIUM": "mid", "LOW QUALITY": "bad"}
 ARROW = {"good": "↑", "mid": "→", "bad": "↓", "none": ""}
-
-
+ 
+ 
 def cards(items) -> None:
     h = '<div class="ft-cards">'
     for label, value, pill, kind in items:
@@ -856,37 +891,37 @@ def cards(items) -> None:
         p = f'<div class="ft-pill {kind}">{ARROW[kind]} {pill}</div>' if pill else ""
         h += f'<div class="ft-card"><div class="ft-clabel">{label}</div><div class="ft-cvalue{sm}">{escape(str(value))}</div>{p}</div>'
     st.markdown(h + "</div>", unsafe_allow_html=True)
-
-
+ 
+ 
 def pio_table(p: dict) -> pd.DataFrame:
     return pd.DataFrame({
         "signal": [x[0] for x in p["spec"]], "name": [x[1] for x in p["spec"]],
         "points": pd.array([None if x[2] is None else int(bool(x[2])) for x in p["spec"]], dtype="Int64"),
         "detail": [x[3] for x in p["spec"]]})
-
-
+ 
+ 
 def alt_table(c: dict) -> pd.DataFrame:
     return pd.DataFrame({
         "factor": FACTOR_NAMES, "peso": m["w"],
         "ratio": [None if v is None else round(v, 4) for v in c["x"]],
         "contribución": [None if v is None or not w else round(v, 4) for v, w in zip(c["contrib"], m["w"])]})
-
-
+ 
+ 
 zval = "—" if last["z"] is None else f"{last['z']:.2f}"
 fval = "—" if last_p["score"] is None else f"{last_p['score']}/9"
 cards([
     ("COMPANY", company, "", "none"),
     ("F-SCORE", fval, last_p["zone"] if last_p["score"] is not None else "", PK.get(last_p["zone"], "none")),
     ("Z-SCORE", zval, last["zone"] if last["z"] is not None else "", ZK.get(last["zone"], "none")),
-    ("TOTAL ASSETS", _fmt_num(latest.get("total_assets")), "", "none"),
-    ("BOOK EQUITY", _fmt_num(latest.get("equity")), "", "none"),
+    ("TOTAL ASSETS (ARS)", _fmt_num(latest.get("total_assets")), "", "none"),
+    ("BOOK EQUITY (ARS)", _fmt_num(latest.get("equity")), "", "none"),
     ("FY", str(latest["fy"]), "", "none"),
 ])
-
+ 
 st.markdown('<div style="height:2px"></div>', unsafe_allow_html=True)
 tab_o, tab_p, tab_c, tab_h, tab_f, tab_g, tab_d = st.tabs(
     ["OVERVIEW", "PIOTROSKI", "ALTMAN", "HISTORIAL", "FORMULAS", "CHARTS", "DATOS"])
-
+ 
 with tab_o:
     st.header("Piotroski F-Score")
     st.dataframe(pio_table(last_p), width="stretch", hide_index=True)
@@ -898,7 +933,7 @@ with tab_o:
     st.markdown(f"Constante: `{m['const']}` · **Z = {'n/a' if last['z'] is None else format(last['z'], '.3f')}** · {last['zone']}")
     if last["missing"]:
         st.warning("Faltan datos para: " + ", ".join(last["missing"]))
-
+ 
 with tab_p:
     yr2 = st.selectbox("Ejercicio", list(hist["FY"])[::-1], key="yr_pio")
     p = pio[list(hist["FY"]).index(yr2)]
@@ -907,7 +942,7 @@ with tab_p:
     if p["n"] < 9:
         st.warning("Hay criterios sin dato. Cargá el balance del ejercicio anterior o completá en DATOS: "
                    "net_income, cfo, long_term_debt, cost_of_sales, share_capital.")
-
+ 
 with tab_c:
     yr = st.selectbox("Ejercicio", list(hist["FY"])[::-1], key="yr_altman")
     c = comp[list(hist["FY"]).index(yr)]
@@ -919,14 +954,14 @@ with tab_c:
     notes = [r.get("notes") for r in mine if str(r["fy"]) == yr and r.get("notes")]
     if notes:
         st.caption("Notas de extracción: " + " | ".join(notes))
-
+ 
 with tab_h:
     st.dataframe(hist, width="stretch", hide_index=True)
     zs = [z for z in hist["Z-Score"] if z is not None and not pd.isna(z)]
     if zs:
         st.markdown(f"**Altman promedio:** `{sum(zs) / len(zs):.2f}` · Mín `{min(zs):.2f}` · Máx `{max(zs):.2f}`")
     st.caption("Los ratios usan valores de una misma columna del balance, por lo que la reexpresión por inflación no los distorsiona.")
-
+ 
 with tab_g:
     st.subheader("Evolución de los indicadores")
     st.caption("Ejercicios cargados, del más antiguo al más reciente.")
@@ -948,7 +983,7 @@ with tab_g:
         zones = _threshold_layer([(m["hi"], f"SAFE > {m['hi']}", "#3ddc84"),
                                   (m["lo"], f"DISTRESS < {m['lo']}", "#ff5c5c")])
         st.altair_chart(_style_chart((zones + line + labels).properties(height=340, title=model)), width="stretch")
-
+ 
         long = pd.DataFrame([
             {"FY": h["FY"], "factor": FACTOR_NAMES[i].split()[0], "contribución": c["contrib"][i]}
             for h, c in zip(rows, comp) if h["Z-Score"] is not None
@@ -965,7 +1000,7 @@ with tab_g:
         st.altair_chart(_style_chart((zones + bars + total + total_lbl).properties(
             height=380, title="Contribución de X1–X5 por año")), width="stretch")
         st.caption("Barras: peso × ratio de cada factor. El rombo ámbar es el Z-Score total.")
-
+ 
     dp = hist.dropna(subset=["F-Score"])
     if not dp.empty:
         yrs = list(dp["FY"])
@@ -977,7 +1012,7 @@ with tab_g:
         flbl = fb.mark_text(dy=-8, color="#e8f3e9", fontSize=12, font="IBM Plex Mono").encode(text="F-Score:Q")
         fz = _threshold_layer([(8, "FUERTE ≥ 8", "#3ddc84"), (3.5, "DÉBIL ≤ 3", "#ff5c5c")])
         st.altair_chart(_style_chart((fz + fbars + flbl).properties(height=300, title="Piotroski F-Score")), width="stretch")
-
+ 
 with tab_d:
     st.caption("Podés corregir valores, agregar un ejercicio a mano o borrar filas. Luego tocá **Guardar cambios**.")
     cols = ["fy", "period_end", "origin", "source"] + FIELDS + ["notes"]
@@ -994,25 +1029,25 @@ with tab_d:
         st.session_state.records = merge(keep, new)
         save(st.session_state.records)
         st.rerun()
-
+ 
 with tab_f:
     st.markdown(r"""
 **Altman** — **X1** = (Act. corriente − Pas. corriente) / Activo · **X2** = Resultados acumulados / Activo ·
 **X3** = EBIT / Activo · **X4** = **Patrimonio neto contable** / Pasivo · **X5** = Ventas / Activo
-
+ 
 | Modelo | Fórmula | Cortes (distress / safe) |
 |---|---|---|
 | Z'' | 6,56·X1 + 3,26·X2 + 6,72·X3 + 1,05·X4 | 1,10 / 2,60 |
 | Z'' EM | 3,25 + Z'' | 4,15 / 5,85 |
 | Z' | 0,717·X1 + 0,847·X2 + 3,107·X3 + 0,420·X4 + 0,998·X5 | 1,23 / 2,90 |
-
+ 
 **Piotroski** — 1 punto por cada criterio cumplido:
 1. Resultado neto > 0 · 2. CFO > 0 · 3. ROA (RN/Activo) mayor que el año anterior · 4. CFO > Resultado neto ·
 5. Deuda financiera no corriente / Activo menor que el año anterior · 6. Liquidez corriente mayor ·
 7. Capital social nominal sin aumento · 8. Margen bruto ((Ventas − Costo)/Ventas) mayor · 9. Rotación (Ventas/Activo) mayor.
 Puntaje 8–9 fuerte, 4–7 medio, 0–3 débil. Para una no cotizante, el criterio 7 se mide con el capital social nominal.
 """)
-
+ 
 
 
 
