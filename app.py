@@ -1,6 +1,6 @@
 """Fundamental Terminal — Altman Z-Score + Piotroski F-Score para concesionarias viales que NO cotizan.
  
-Subís los balances en PDF, Claude los lee (la API key se configura UNA vez en el servidor, no aparece en la pantalla),
+Subís los balances en PDF, se leen localmente (sin IA). La IA es opcional, solo para completar campos faltantes,
 la app acumula los ejercicios y calcula el historial de Altman y Piotroski.
 Requiere: streamlit, pandas, altair, pypdf, anthropic
 API key: variable de entorno ANTHROPIC_API_KEY o .streamlit/secrets.toml  ->  ANTHROPIC_API_KEY = "sk-ant-..."
@@ -192,179 +192,8 @@ def merge(records: list[dict], new: list[dict]) -> list[dict]:
     return sorted(out.values(), key=lambda r: (r["company"].lower(), int(r["fy"])))
  
  
-# ═════════════════════════ 3. EXTRACCIÓN DESDE PDF ═════════════════════════
- 
-MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
-MAX_PAGES = 140
-MAX_UPLOAD_MB = 22
-KEYWORDS = re.compile(
-    r"estado de situaci[oó]n|balance general|estado de resultados|estado del resultado|"
-    r"evoluci[oó]n del patrimonio|flujo de efectivo|total del activo|total activo", re.I)
- 
-PROMPT = """Sos un analista contable argentino. Del PDF adjunto (estados contables de una concesionaria vial)
-extraé los datos para calcular el Altman Z-Score y el Piotroski F-Score. Devolvé SOLO un JSON, sin texto ni markdown, con esta forma:
- 
-{"company": "razón social",
- "periods": [
-  {"period_end": "YYYY-MM-DD", "column": "current" | "prior",
-   "current_assets": n, "current_liabilities": n, "total_assets": n, "total_liabilities": n,
-   "equity": n, "retained_earnings": n, "ebit": n, "sales": n,
-   "net_income": n, "cfo": n, "long_term_debt": n, "cost_of_sales": n, "share_capital": n,
-   "notes": "texto breve"}
- ]}
- 
-Reglas:
-- Una entrada por cada columna del estado de situación patrimonial: el ejercicio actual ("current") y el comparativo ("prior").
-- Números en unidades completas (si el estado dice "en millones", multiplicá por 1.000.000). Pérdidas con signo negativo.
-- retained_earnings = reservas (legal, facultativa, otras) + resultados no asignados/acumulados (incluye el resultado del ejercicio). NO incluyas capital social ni ajuste de capital.
-- ebit = resultado operativo antes de resultados financieros (intereses, diferencias de cambio, RECPAM, tenencia) y antes de impuesto a las ganancias.
-  Si no hay esa línea, calculalo como resultado antes de impuesto menos resultados financieros netos. En "notes" aclará cómo lo obtuviste.
-- sales = ingresos operativos (peajes / concesión).
-- net_income = resultado neto del ejercicio (después de impuesto a las ganancias).
-- cfo = flujo neto de efectivo generado por (usado en) actividades operativas, del estado de flujo de efectivo de cada columna.
-- long_term_debt = deudas financieras NO corrientes (préstamos, obligaciones negociables, otras deudas financieras no corrientes). No incluyas proveedores ni deudas fiscales.
-- cost_of_sales = costo de los servicios prestados / costo de explotación del ejercicio (en positivo).
-- share_capital = capital social nominal (sin ajuste de capital).
-- Si un dato no figura, usá null. No inventes valores."""
- 
- 
-def select_pages(pdf_bytes: bytes) -> bytes:
-    from pypdf import PdfReader, PdfWriter
- 
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    n = len(reader.pages)
-    if n <= MAX_PAGES:
-        return pdf_bytes
-    hits = []
-    for i, p in enumerate(reader.pages):
-        try:
-            if KEYWORDS.search(p.extract_text() or ""):
-                hits.append(i)
-        except Exception:  # noqa: BLE001
-            continue
-    keep = sorted({j for i in hits for j in (i, i + 1) if j < n})[:MAX_PAGES] or list(range(MAX_PAGES))
-    w = PdfWriter()
-    for i in keep:
-        w.add_page(reader.pages[i])
-    buf = io.BytesIO()
-    w.write(buf)
-    return buf.getvalue()
- 
- 
-def parse_json(text: str) -> dict:
-    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
-    a, b = text.find("{"), text.rfind("}")
-    if a < 0 or b < 0:
-        raise ValueError("La respuesta no contiene un JSON.")
-    return json.loads(text[a:b + 1])
- 
- 
-def normalize(result: dict, source: str, company: str | None = None) -> list[dict]:
-    recs = []
-    for p in result.get("periods", []):
-        end = str(p.get("period_end") or "")[:10]
-        if not re.match(r"\d{4}-\d{2}-\d{2}$", end):
-            continue
-        recs.append({
-            "company": company or result.get("company") or "Sin nombre",
-            "fy": int(end[:4]), "period_end": end,
-            "origin": "own" if p.get("column") == "current" else "comparative",
-            "source": source,
-            **{k: p.get(k) for k in FIELDS},
-            "notes": p.get("notes") or "",
-        })
-    return recs
- 
- 
-def extract(pdf_bytes: bytes, api_key: str, source: str, company: str | None = None, model: str = MODEL) -> list[dict]:
-    """Envía el PDF a Claude y devuelve registros normalizados.
- 
-    La API de Anthropic admite PDFs como bloques de documento codificados en base64.
-    Se valida tamaño y se devuelven errores legibles para Streamlit.
-    """
-    if not api_key:
-        raise RuntimeError(
-            "No está configurada ANTHROPIC_API_KEY. Configurala en "
-            "Streamlit Cloud → Settings → Secrets."
-        )
- 
-    size_mb = len(pdf_bytes) / (1024 * 1024)
-    if size_mb > MAX_UPLOAD_MB:
-        raise ValueError(
-            f"El PDF pesa {size_mb:.1f} MB. El límite recomendado de esta app es "
-            f"{MAX_UPLOAD_MB} MB para enviarlo a Claude."
-        )
- 
-    try:
-        import anthropic
-    except ImportError as exc:
-        raise RuntimeError(
-            "Falta instalar el paquete anthropic. Agregá 'anthropic>=0.75.0' a requirements.txt."
-        ) from exc
- 
-    selected_pdf = select_pages(pdf_bytes)
-    data = base64.standard_b64encode(selected_pdf).decode("utf-8")
- 
-    client = anthropic.Anthropic(api_key=api_key)
-    try:
-        msg = client.messages.create(
-            model=model,
-            max_tokens=12000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": data,
-                            },
-                        },
-                        {"type": "text", "text": PROMPT},
-                    ],
-                }
-            ],
-        )
-    except Exception as exc:
-        msg_text = str(exc)
-        if "authentication" in msg_text.lower() or "401" in msg_text:
-            raise RuntimeError(
-                "La ANTHROPIC_API_KEY fue rechazada. Revisá que sea válida y esté activa."
-            ) from exc
-        if "not_found" in msg_text.lower() or "model" in msg_text.lower() and "404" in msg_text:
-            raise RuntimeError(
-                f"El modelo '{model}' no está disponible para tu API key. "
-                "Podés definir CLAUDE_MODEL en Secrets."
-            ) from exc
-        if "413" in msg_text or "too large" in msg_text.lower():
-            raise RuntimeError(
-                "El PDF excede el tamaño máximo aceptado por la API. Probá con un PDF más liviano."
-            ) from exc
-        raise RuntimeError(f"Error de Anthropic al analizar '{source}': {msg_text}") from exc
- 
-    text = "".join(
-        b.text for b in msg.content if getattr(b, "type", "") == "text"
-    )
-    if not text.strip():
-        raise RuntimeError("Claude respondió sin contenido de texto.")
- 
-    try:
-        result = parse_json(text)
-    except Exception as exc:
-        preview = text[:500].replace("\n", " ")
-        raise RuntimeError(
-            "Claude no devolvió un JSON válido. Respuesta parcial: " + preview
-        ) from exc
- 
-    recs = normalize(result, source, company)
-    if not recs:
-        raise RuntimeError(
-            "Claude procesó el PDF pero no encontró ejercicios con fecha válida. "
-            "Revisá que el archivo contenga estados contables legibles."
-        )
-    return recs
+# ═════════════════════════ 3. EXTRACCIÓN (local, sin IA) ═════════════════════════
+from extractor import extract_pdf, AI_MODEL as MODEL  # noqa: E402
  
  
 # ═════════════════════════ 4. APP STREAMLIT ═════════════════════════
@@ -771,6 +600,9 @@ with st.sidebar:
             if companies else "➕ Nueva empresa…")
     company = st.text_input("Nombre de la empresa (opcional, si no lo detecta del PDF)").strip() if pick.startswith("➕") else pick
     files = st.file_uploader("Balances (PDF)", type="pdf", accept_multiple_files=True)
+    use_ai = st.checkbox("Completar faltantes con IA (opcional)", value=False,
+                         help="Por defecto el PDF se lee localmente, sin gastar tokens. Si se activa, solo se envía a Claude "
+                              "el texto de las páginas clave para los campos que no se pudieron leer.")
     go = st.button("ANALIZAR BALANCE", width="stretch", type="primary")
     st.markdown("---")
     st.markdown(
@@ -780,17 +612,8 @@ with st.sidebar:
     )
     model = st.selectbox("Modelo Altman", list(MODELS), index=1,
                          help="Z'' EM suma 3,25 al Z'' y corre los cortes; es la versión para mercados emergentes.")
-    ok, status_text = api_status()
-    status_bg = "rgba(61,220,132,.12)" if ok else "rgba(255,98,98,.12)"
-    status_color = "#3ddc84" if ok else "#ff6262"
-    st.markdown(
-        f'<div style="margin-top:10px;padding:9px 10px;border:1px solid #263229;'
-        f'background:{status_bg};font-family:IBM Plex Mono,monospace;font-size:10px;'
-        f'color:{status_color};letter-spacing:.04em">● {status_text}</div>',
-        unsafe_allow_html=True,
-    )
     st.markdown("---")
-    st.caption(f"Motor de extracción: {MODEL}")
+    st.caption("Lectura local del PDF (sin IA)" + (f" · relleno con {MODEL}" if use_ai else ""))
     st.caption("Respaldo de datos")
     st.download_button("Descargar JSON", json.dumps(records, ensure_ascii=False, indent=1),
                        "balances.json", "application/json", width="stretch")
@@ -803,25 +626,24 @@ if go:
     flash = []
     if not files:
         flash.append(("error", "No hay ningún PDF seleccionado."))
-    elif not API_KEY:
-        flash.append((
-            "error",
-            "PDF cargado, pero falta ANTHROPIC_API_KEY. Configurala en Streamlit Cloud → Settings → Secrets."
-        ))
     else:
         last_company = None
+        if use_ai and not API_KEY:
+            flash.append(("warning", "IA activada pero no hay ANTHROPIC_API_KEY: se usa solo lectura local."))
         for f in files:
-            pdf_bytes = f.getvalue()
-            size_mb = len(pdf_bytes) / (1024 * 1024)
-            with st.spinner(f"Analizando {f.name} ({size_mb:.1f} MB)…"):
+            with st.spinner(f"Leyendo {f.name}…"):
                 try:
-                    new = extract(pdf_bytes, API_KEY, f.name, company or None, MODEL)
+                    new, info = extract_pdf(f.getvalue(), f.name, company or None, use_ai, API_KEY, MODEL,
+                                            st.session_state.setdefault("ai_cache", {}))
                     commit(new)
                     last_company = new[0]["company"]
-                    flash.append((
-                        "success",
-                        f"✓ {f.name}: {len(new)} ejercicio(s) detectado(s) para {last_company}."
-                    ))
+                    msg = f"✓ {f.name}: {len(new)} ejercicio(s) para {last_company}."
+                    if info["ai"]:
+                        msg += " IA completó: " + ", ".join(info["ai"]) + "."
+                    flash.append(("success", msg))
+                    if info["missing"]:
+                        flash.append(("warning", f"{f.name}: sin dato → " + ", ".join(info["missing"])
+                                      + ". Completalos en DATOS."))
                 except Exception as exc:  # noqa: BLE001
                     flash.append(("error", f"✕ {f.name}: {exc}"))
         if last_company:
@@ -848,14 +670,8 @@ if not mine:
     render_masthead(company or None, model)
     if files:
         names = " · ".join(f.name for f in files)
-        if API_KEY:
-            st.success(f"PDF listo para analizar: {names}")
-            st.info("Ahora hacé clic en **ANALIZAR BALANCE**. La app enviará el PDF a Claude y luego mostrará Altman y Piotroski.")
-        else:
-            st.error("El PDF está cargado, pero falta configurar **ANTHROPIC_API_KEY**.")
-            st.markdown(
-                "**Streamlit Cloud:** Settings → Secrets → agregá `ANTHROPIC_API_KEY = \"sk-ant-...\"` → Save → Reboot."
-            )
+        st.success(f"PDF listo para analizar: {names}")
+        st.info("Ahora hacé clic en **ANALIZAR BALANCE**. El PDF se lee localmente, sin gastar tokens.")
     else:
         st.info("Subí uno o más balances en PDF de la concesionaria y luego tocá **ANALIZAR BALANCE**.")
     st.stop()
@@ -1047,7 +863,6 @@ with tab_f:
 7. Capital social nominal sin aumento · 8. Margen bruto ((Ventas − Costo)/Ventas) mayor · 9. Rotación (Ventas/Activo) mayor.
 Puntaje 8–9 fuerte, 4–7 medio, 0–3 débil. Para una no cotizante, el criterio 7 se mide con el capital social nominal.
 """)
- 
 
 
 
